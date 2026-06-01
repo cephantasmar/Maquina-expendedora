@@ -16,6 +16,8 @@ class AdminDashboardController extends ChangeNotifier {
   
   List<dynamic> machines = [];
   Map<String, List<dynamic>> inventories = {};
+  Map<String, List<dynamic>> topSellers = {};
+  Map<String, dynamic> banner = {};
 
   AdminDashboardController({
     OrchestratorApiService? api,
@@ -33,15 +35,20 @@ class AdminDashboardController extends ChangeNotifier {
       totalSales = (summary['total_sales'] as num).toDouble();
       statusBreakdown = Map<String, int>.from(summary['status_breakdown'] ?? {});
       
+      banner = await _vendingApi.getBanner();
+
       // Load machines
       final machinesData = await _vendingApi.listMachines();
       machines = machinesData['machines'] ?? [];
       
-      // Load inventories for all machines
+      // Load inventories and stats for all machines
       for (var machine in machines) {
         final machineId = machine['id'];
         final inventoryData = await _vendingApi.getInventory(machineId);
         inventories[machineId] = inventoryData['items'] ?? [];
+        
+        final topSellersData = await _api.getTopSellers(machineId);
+        topSellers[machineId] = List<Map<String, dynamic>>.from(topSellersData['items'] ?? []);
       }
       
       notifyListeners();
@@ -60,6 +67,9 @@ class AdminDashboardController extends ChangeNotifier {
 
     try {
       await _vendingApi.updateInventoryPrice(machineId, slot, newPrice);
+      // Notificar a la máquina para que refresque su pantalla
+      await _api.refreshConfig(machineId);
+      
       // Reload inventory for this machine
       final inventoryData = await _vendingApi.getInventory(machineId);
       inventories[machineId] = inventoryData['items'] ?? [];
@@ -67,6 +77,49 @@ class AdminDashboardController extends ChangeNotifier {
       error = e.toString();
     } finally {
       loading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> updateSlotStatus(String machineId, String slot, bool isEnabled, String? slotType) async {
+    loading = true;
+    error = null;
+    notifyListeners();
+
+    try {
+      await _vendingApi.updateSlotStatus(machineId, slot, isEnabled, slotType);
+      // Reload inventory for this machine
+      final inventoryData = await _vendingApi.getInventory(machineId);
+      inventories[machineId] = inventoryData['items'] ?? [];
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> updateBanner(String url) async {
+    loading = true;
+    error = null;
+    notifyListeners();
+
+    try {
+      await _vendingApi.updateBanner(url);
+      banner = await _vendingApi.getBanner();
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> toggleLights(String machineId) async {
+    try {
+      await _api.toggleLights(machineId);
+    } catch (e) {
+      error = e.toString();
       notifyListeners();
     }
   }

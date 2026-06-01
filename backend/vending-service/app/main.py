@@ -45,7 +45,13 @@ class Inventory(Base):
     stock: Mapped[int] = mapped_column(Integer)
     capacity: Mapped[int] = mapped_column(Integer)
     price: Mapped[float] = mapped_column(Float, nullable=True)
+    is_enabled: Mapped[bool] = mapped_column(Integer, default=1) # 1=True, 0=False para SQLite
+    slot_type: Mapped[str] = mapped_column(String, default="soda") # "soda" o "snack"
 
+class GlobalSetting(Base):
+    __tablename__ = "global_settings"
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(Text) # Cambiado a Text para base64
 
 Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Grog Vending Service")
@@ -61,15 +67,36 @@ def _seed() -> None:
                 ]
             )
         if db.query(Product).count() == 0:
-            db.add_all([Product(id="PROD-1", sku="SODA-001", name="Soda", price=8.5), Product(id="PROD-2", sku="CHIPS-002", name="Chips", price=6.0)])
+            db.add_all([
+                Product(id="PROD-1", sku="SODA-001", name="Soda", price=8.5), 
+                Product(id="PROD-2", sku="CHIPS-002", name="Chips", price=6.0),
+                Product(id="PROD-NONE", sku="NONE", name="Vacío", price=0.0)
+            ])
+        
         if db.query(Inventory).count() == 0:
-            db.add_all(
-                [
-                    Inventory(id=str(uuid4()), machine_id="MACHINE-001", product_id="PROD-1", slot="A1", stock=12, capacity=20, price=8.5),
-                    Inventory(id=str(uuid4()), machine_id="MACHINE-001", product_id="PROD-2", slot="A2", stock=9, capacity=20, price=6.0),
-                    Inventory(id=str(uuid4()), machine_id="MACHINE-002", product_id="PROD-1", slot="A1", stock=3, capacity=20, price=10.0),
-                ]
-            )
+            # Asegurar 16 slots para MACHINE-001
+            slots = []
+            for row in ['A', 'B', 'C', 'D']:
+                for col in range(1, 5):
+                    slot_name = f"{row}{col}"
+                    prod_id = "PROD-1" if row in ['A', 'B'] else "PROD-2"
+                    stype = "soda" if row in ['A', 'B'] else "snack"
+                    slots.append(Inventory(
+                        id=str(uuid4()), 
+                        machine_id="MACHINE-001", 
+                        product_id=prod_id, 
+                        slot=slot_name, 
+                        stock=10, 
+                        capacity=20, 
+                        price=8.5 if stype=="soda" else 6.0,
+                        is_enabled=True,
+                        slot_type=stype
+                    ))
+            db.add_all(slots)
+            
+        if db.query(GlobalSetting).filter(GlobalSetting.key == "banner_url").count() == 0:
+            db.add(GlobalSetting(key="banner_url", value="https://via.placeholder.com/400x100?text=Publicidad+Grog"))
+            
         db.commit()
 
 
@@ -80,11 +107,35 @@ class InventoryUpdateRequest(BaseModel):
     stock: int
     capacity: int
 
+class SlotStatusRequest(BaseModel):
+    is_enabled: bool
+    slot_type: str | None = None
+
+class BannerRequest(BaseModel):
+    url: str
+
 
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "service": "vending-service"}
 
+@app.get("/api/v1/settings/banner")
+def get_banner() -> dict:
+    with SessionLocal() as db:
+        setting = db.query(GlobalSetting).filter(GlobalSetting.key == "banner_url").first()
+        return {"url": setting.value if setting else ""}
+
+@app.post("/api/v1/admin/settings/banner")
+def update_banner(req: BannerRequest) -> dict:
+    with SessionLocal() as db:
+        setting = db.query(GlobalSetting).filter(GlobalSetting.key == "banner_url").first()
+        if not setting:
+            setting = GlobalSetting(key="banner_url", value=req.url)
+            db.add(setting)
+        else:
+            setting.value = req.url
+        db.commit()
+        return {"status": "updated", "url": req.url}
 
 @app.get("/api/v1/machines")
 def list_machines(owner_email: str | None = None) -> dict:
@@ -110,6 +161,8 @@ def machine_inventory(machine_id: str) -> dict:
                     "product_sku": prod.sku,
                     "product_name": prod.name,
                     "price": inv.price if inv.price is not None else prod.price,
+                    "is_enabled": bool(inv.is_enabled),
+                    "slot_type": inv.slot_type
                 }
                 for inv, prod in rows
             ]
@@ -134,8 +187,28 @@ def get_slot_info(machine_id: str, slot_id: str) -> dict:
             "product_id": prod.id,
             "product_name": prod.name,
             "price": inv.price if inv.price is not None else prod.price,
-            "stock": inv.stock
+            "stock": inv.stock,
+            "is_enabled": bool(inv.is_enabled),
+            "slot_type": inv.slot_type
         }
+
+
+@app.patch("/api/v1/machines/{machine_id}/inventory/{slot_or_id}/status")
+def update_slot_status(machine_id: str, slot_or_id: str, req: SlotStatusRequest) -> dict:
+    with SessionLocal() as db:
+        item = db.query(Inventory).filter(
+            (Inventory.machine_id == machine_id) & 
+            ((Inventory.id == slot_or_id) | (Inventory.slot == slot_or_id))
+        ).first()
+        
+        if not item:
+            raise HTTPException(status_code=404, detail="Inventory item not found")
+            
+        item.is_enabled = req.is_enabled
+        if req.slot_type:
+            item.slot_type = req.slot_type
+        db.commit()
+        return {"status": "updated", "slot": item.slot, "is_enabled": bool(item.is_enabled), "slot_type": item.slot_type}
 
 
 @app.patch("/api/v1/machines/{machine_id}/inventory/{slot_or_id}/price")

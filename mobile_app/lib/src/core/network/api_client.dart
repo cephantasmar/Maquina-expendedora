@@ -114,6 +114,50 @@ class ApiClient {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  Future<Map<String, dynamic>> updateSlotStatus(String machineId, String slot, bool isEnabled, String slotType) async {
+    final res = await _client.patch(
+      Uri.parse('${AppConfig.vendingUrl}/api/v1/machines/$machineId/inventory/$slot/status'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'is_enabled': isEnabled, 'slot_type': slotType}),
+    );
+    _ensureSuccess(res);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> getBanner() async {
+    final res = await _client.get(
+      Uri.parse('${AppConfig.vendingUrl}/api/v1/settings/banner'),
+    );
+    _ensureSuccess(res);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> updateBanner(String url) async {
+    final res = await _client.post(
+      Uri.parse('${AppConfig.vendingUrl}/api/v1/admin/settings/banner'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'url': url}),
+    );
+    _ensureSuccess(res);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> topSellers(String machineId) async {
+    final res = await _client.get(
+      Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/stats/top-sellers?machine_id=$machineId'),
+    );
+    _ensureSuccess(res);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
+  Future<Map<String, dynamic>> toggleLights(String machineId) async {
+    final res = await _client.post(
+      Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/commands/$machineId/toggle-lights'),
+    );
+    _ensureSuccess(res);
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
+
   void _ensureSuccess(http.Response res) {
     if (res.statusCode >= 200 && res.statusCode < 300) return;
     throw Exception('HTTP ${res.statusCode}: ${res.body}');

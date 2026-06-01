@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 
 import httpx
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Request
 from pydantic import BaseModel
 from sqlalchemy import DateTime, Float, Integer, String, create_engine, func, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
@@ -78,6 +78,7 @@ class InitTransactionRequest(BaseModel):
 
 class TelemetryRequest(BaseModel):
     temperature: float
+    ip: str | None = None
 
 class DispenseResultRequest(BaseModel):
     success: bool
@@ -192,8 +193,9 @@ async def payment_confirmed(tx_id: str) -> TransactionResponse:
         res = to_response(tx)
     if IOT_WEBHOOK_ENABLED:
         try:
-            url = IOT_WEBHOOK_URL_TEMPLATE.replace("{machine_id}", machine_id).replace("{tx_id}", tx_id)
-            async with httpx.AsyncClient() as client: await client.post(url, json={"tx_id": tx_id}, timeout=2.0)
+            url = IOT_WEBHOOK_URL_TEMPLATE.rstrip("/") + "/payment-confirmed"
+            async with httpx.AsyncClient() as client: 
+                await client.post(url, data={"tx_id": tx_id}, timeout=2.0)
         except: pass
     return res
 
@@ -271,6 +273,49 @@ def list_tx() -> dict:
         rows = db.query(Transaction).order_by(Transaction.created_at.desc()).limit(50).all()
         return {"items": [to_response(r).model_dump() for r in rows]}
 
+@app.get("/api/v1/admin/stats/top-sellers")
+async def get_top_sellers(machine_id: str = "MACHINE-001"):
+    with SessionLocal() as db:
+        # Contar transacciones completadas por product_id (slot)
+        rows = db.query(
+            Transaction.product_id, 
+            func.count(Transaction.id).label("count")
+        ).filter(
+            Transaction.machine_id == machine_id,
+            Transaction.state == TransactionState.COMPLETED.value
+        ).group_by(Transaction.product_id).order_by(text("count DESC")).all()
+        
+        return {
+            "machine_id": machine_id,
+            "items": [{"slot": r[0], "count": r[1]} for r in rows]
+        }
+
+# Almacenamiento en memoria para comandos de máquinas
+command_queues = {}
+
+@app.post("/api/v1/admin/commands/{machine_id}/toggle-lights")
+async def toggle_lights(machine_id: str):
+    if machine_id not in command_queues:
+        command_queues[machine_id] = []
+    command_queues[machine_id].append("toggle_lights")
+    print(f"DEBUG: Enqueued toggle_lights for {machine_id}")
+    return {"status": "queued", "command": "toggle_lights", "machine_id": machine_id}
+
+@app.post("/api/v1/admin/commands/{machine_id}/refresh-config")
+async def refresh_config(machine_id: str):
+    if machine_id not in command_queues:
+        command_queues[machine_id] = []
+    # Usamos un string largo para que el ESP32 lo detecte como comando de actualización
+    command_queues[machine_id].append("refresh_inventory_config")
+    print(f"DEBUG: Enqueued refresh_config for {machine_id}")
+    return {"status": "queued", "command": "refresh_config", "machine_id": machine_id}
+
+@app.get("/api/v1/admin/commands/poll/{machine_id}")
+async def poll_commands(machine_id: str):
+    commands = command_queues.get(machine_id, [])
+    command_queues[machine_id] = [] # Limpiar cola después de entregar
+    return {"commands": commands}
+
 @app.get("/api/v1/admin/stats/summary")
 async def admin_stats_summary():
     with SessionLocal() as db:
@@ -331,13 +376,20 @@ async def admin_distance_history(machine_id: str = "MACHINE-001"):
             ]
         }
 
+# Almacenamiento en memoria para IPs de máquinas
+machine_ips = {}
+
 @app.post("/api/v1/machines/{machine_id}/telemetry")
 async def record_telemetry(machine_id: str, req: TelemetryRequest):
+    # Registrar IP enviada por el ESP32
+    if req.ip:
+        machine_ips[machine_id] = req.ip
+    
     with SessionLocal() as db:
         new_entry = MachineTelemetry(machine_id=machine_id, temperature=req.temperature)
         db.add(new_entry)
         db.commit()
-    return {"status": "ok", "machine_id": machine_id, "temperature": req.temperature}
+    return {"status": "ok", "machine_id": machine_id, "temperature": req.temperature, "ip_registered": machine_ips.get(machine_id)}
 
 @app.get("/api/v1/machines/{machine_id}/telemetry")
 async def get_telemetry(machine_id: str, limit: int = 20):

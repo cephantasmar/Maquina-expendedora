@@ -227,9 +227,11 @@ async def authorize_payment(req: AuthorizeRequest, idempotency_key: str | None =
                 return json.loads(cached.response_json)
 
     async with httpx.AsyncClient() as client:
+        # Usamos el nombre del servicio en la red de docker
+        webhook_url = "http://simupay-service:8020/api/v1/webhooks/simupay"
         session_res = await client.post(
             f"{PAYMENT_GATEWAY_URL}/sessions",
-            json={"amount": req.amount, "enrollment_id": req.transaction_id, "callback_url": "", "webhook_url": ""},
+            json={"amount": req.amount, "enrollment_id": req.transaction_id, "callback_url": "", "webhook_url": webhook_url},
             timeout=15.0,
         )
         if session_res.status_code >= 400:

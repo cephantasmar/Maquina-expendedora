@@ -21,7 +21,8 @@ class RoleDashboardScreen extends StatefulWidget {
   State<RoleDashboardScreen> createState() => _RoleDashboardScreenState();
 }
 
-class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
+class _RoleDashboardScreenState extends State<RoleDashboardScreen> with SingleTickerProviderStateMixin {
+  late TabController? _tabController;
   final ApiClient _api = ApiClient();
   final OrchestratorApi _orchestrator = OrchestratorApi();
   final TextEditingController _toEmail = TextEditingController(
@@ -34,6 +35,8 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
   Map<String, dynamic> _machines = {};
   Map<String, dynamic> _sales = {};
   Map<String, dynamic> _iot = {};
+  Map<String, dynamic> _banner = {};
+  Map<String, dynamic> _topSellers = {};
   List<TransactionView> _transactions = [];
   bool _loading = true;
   String _info = '';
@@ -41,7 +44,16 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
   @override
   void initState() {
     super.initState();
+    _tabController = widget.role == 'ADMIN' 
+        ? TabController(length: 4, vsync: this)
+        : null;
     _load();
+  }
+
+  @override
+  void dispose() {
+    _tabController?.dispose();
+    super.dispose();
   }
 
   Map<String, List<dynamic>> _machineInventories = {};
@@ -50,6 +62,7 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
     setState(() => _loading = true);
     final prefs = await SharedPreferences.getInstance();
     try {
+      _banner = await _api.getBanner();
       if (widget.role == 'CLIENT') {
         _wallet = await _api.wallet(widget.email);
         _history = await _api.walletHistory(widget.email);
@@ -57,18 +70,26 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
         await prefs.setString('cache_client_wallet', jsonEncode(_wallet));
         await prefs.setString('cache_client_history', jsonEncode(_history));
       } else if (widget.role == 'ADMIN') {
+        // Cargar tambien billetera para ADMIN
+        _wallet = await _api.wallet(widget.email);
+        _history = await _api.walletHistory(widget.email);
+
         _machines = await _api.machines(ownerEmail: widget.email);
         _sales = await _api.sales();
-        
+
         final machineList = (_machines['machines'] as List<dynamic>? ?? []);
         for (var m in machineList) {
-          final inv = await _api.inventory(m['id']);
-          _machineInventories[m['id']] = inv['items'] ?? [];
+          final machineId = m['id'];
+          final inv = await _api.inventory(machineId);
+          _machineInventories[machineId] = inv['items'] ?? [];
+          final stats = await _api.topSellers(machineId);
+          _topSellers[machineId] = stats['items'] ?? [];
         }
 
         await prefs.setString('cache_admin_machines', jsonEncode(_machines));
         await prefs.setString('cache_admin_sales', jsonEncode(_sales));
-      } else {
+      }
+ else {
         _machines = await _api.machines();
         _iot = await _api.iotMachines();
         await prefs.setString('cache_devops_machines', jsonEncode(_machines));
@@ -91,32 +112,141 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
     }
   }
 
-  void _showEditPriceDialog(String machineId, String slot, String name, dynamic currentPrice) {
-    final controller = TextEditingController(text: currentPrice.toString());
+  Future<void> _updateStatus(String machineId, String slot, bool isEnabled, String slotType) async {
+    try {
+      await _api.updateSlotStatus(machineId, slot, isEnabled, slotType);
+      setState(() => _info = 'Estado de slot $slot actualizado');
+      await _load();
+    } catch (e) {
+      setState(() => _info = e.toString());
+    }
+  }
+
+  void _showEditSlotDialog(String machineId, dynamic item) {
+    final slot = item['slot'];
+    final name = item['product_name'];
+    final priceController = TextEditingController(text: item['price'].toString());
+    bool isEnabled = item['is_enabled'] ?? true;
+    String slotType = item['slot_type'] ?? 'soda';
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => AlertDialog(
+          title: Text('Gestionar Slot $slot: $name'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: priceController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Precio (Bs.)'),
+                ),
+                const SizedBox(height: 16),
+                SwitchListTile(
+                  title: const Text('Habilitado'),
+                  value: isEnabled,
+                  onChanged: (v) => setModalState(() => isEnabled = v),
+                ),
+                const Text('Tipo de Producto:'),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('Soda'),
+                      selected: slotType == 'soda',
+                      onSelected: (v) => setModalState(() => slotType = 'soda'),
+                    ),
+                    const SizedBox(width: 8),
+                    ChoiceChip(
+                      label: const Text('Snack'),
+                      selected: slotType == 'snack',
+                      onSelected: (v) => setModalState(() => slotType = 'snack'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+            FilledButton(
+              onPressed: () {
+                final newPrice = double.tryParse(priceController.text);
+                if (newPrice != null) {
+                  Navigator.pop(context);
+                  _updatePrice(machineId, slot, newPrice);
+                  _updateStatus(machineId, slot, isEnabled, slotType);
+                }
+              },
+              child: const Text('Guardar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showStatsDialog(String machineId) {
+    final stats = _topSellers[machineId] as List<dynamic>? ?? [];
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Editar Precio: $name'),
+        title: const Text('Estadísticas: Lo más vendido'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: stats.isEmpty 
+            ? const Text('No hay ventas registradas aún.')
+            : ListView.builder(
+                shrinkWrap: true,
+                itemCount: stats.length,
+                itemBuilder: (context, i) => ListTile(
+                  leading: CircleAvatar(child: Text('${i+1}')),
+                  title: Text('Slot ${stats[i]['slot']}'),
+                  trailing: Text('${stats[i]['count']} ventas'),
+                ),
+              ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cerrar')),
+        ],
+      ),
+    );
+  }
+
+  void _showBannerConfigDialog() {
+    final controller = TextEditingController(text: _banner['url'] ?? '');
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Configurar Banner Publicitario'),
         content: TextField(
           controller: controller,
-          keyboardType: TextInputType.number,
-          decoration: const InputDecoration(labelText: 'Nuevo Precio (Bs.)'),
+          decoration: const InputDecoration(labelText: 'URL de la imagen'),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
           FilledButton(
-            onPressed: () {
-              final newPrice = double.tryParse(controller.text);
-              if (newPrice != null) {
-                Navigator.pop(context);
-                _updatePrice(machineId, slot, newPrice);
-              }
+            onPressed: () async {
+              await _api.updateBanner(controller.text);
+              Navigator.pop(context);
+              _load();
             },
             child: const Text('Guardar'),
           ),
         ],
       ),
     );
+  }
+
+  Future<void> _toggleLights(String machineId) async {
+    try {
+      await _api.toggleLights(machineId);
+      setState(() => _info = 'Comando de luces enviado a $machineId');
+    } catch (e) {
+      setState(() => _info = e.toString());
+    }
   }
 
   Future<void> _transfer() async {
@@ -181,10 +311,22 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
     }
     return Scaffold(
       appBar: AppBar(
-        title: Text('Dashboard ${widget.role} - ${widget.email}'),
+        title: Text('Grog - ${widget.role}'),
         actions: [
           IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
         ],
+        bottom: widget.role == 'ADMIN'
+            ? TabBar(
+                controller: _tabController,
+                isScrollable: true,
+                tabs: const [
+                  Tab(icon: Icon(Icons.account_balance_wallet), text: 'Mi Billetera'),
+                  Tab(icon: Icon(Icons.analytics), text: 'Resumen Ventas'),
+                  Tab(icon: Icon(Icons.grid_view), text: 'Máquinas'),
+                  Tab(icon: Icon(Icons.campaign), text: 'Publicidad'),
+                ],
+              )
+            : null,
       ),
       body: Padding(
         padding: const EdgeInsets.all(12),
@@ -192,12 +334,222 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (_info.isNotEmpty)
-              Text(_info, style: const TextStyle(color: Colors.indigo)),
+              Container(
+                padding: const EdgeInsets.all(8),
+                color: Colors.indigo.withOpacity(0.1),
+                child: Text(_info, style: const TextStyle(color: Colors.indigo)),
+              ),
             const SizedBox(height: 10),
-            Expanded(child: _buildByRole()),
+            Expanded(
+              child: widget.role == 'ADMIN'
+                  ? TabBarView(
+                      controller: _tabController,
+                      children: [
+                        _buildAdminWalletTab(),
+                        _buildAdminSalesTab(),
+                        _buildAdminMachinesTab(),
+                        _buildAdminBannerTab(),
+                      ],
+                    )
+                  : _buildByRole(),
+            ),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildAdminWalletTab() {
+    final balance = _wallet['balance'] ?? 0;
+    final history = (_history['items'] as List<dynamic>? ?? []);
+    return ListView(
+      children: [
+        Card(
+          elevation: 4,
+          child: ListTile(
+            leading: const Icon(Icons.account_balance_wallet, size: 40, color: Colors.indigo),
+            title: const Text('Saldo SimuPay', style: TextStyle(fontWeight: FontWeight.bold)),
+            subtitle: Text('Bs. $balance', style: const TextStyle(fontSize: 20, color: Colors.green, fontWeight: FontWeight.bold)),
+          ),
+        ),
+        const SizedBox(height: 16),
+        const Text('Historial Reciente', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        const Divider(),
+        ...history.map((e) => Card(
+          child: ListTile(
+            leading: Icon(
+              e['type'] == 'deposit' ? Icons.arrow_downward : Icons.arrow_upward,
+              color: e['type'] == 'deposit' ? Colors.green : Colors.red,
+            ),
+            title: Text('${e['type']}'.toUpperCase()),
+            subtitle: Text('Hacia: ${e['to_email'] ?? 'N/A'}'),
+            trailing: Text('Bs. ${e['amount']}', style: const TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        )),
+        if (history.isEmpty)
+          const Padding(
+            padding: EdgeInsets.all(16.0),
+            child: Text('No hay transacciones registradas', textAlign: TextAlign.center),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildAdminSalesTab() {
+    return ListView(
+      children: [
+        Card(
+          elevation: 4,
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                const Text('Ventas Totales', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.today, color: Colors.green),
+                  title: const Text('Hoy'),
+                  trailing: Text('Bs. ${_sales['daily_total']}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.calendar_month, color: Colors.blue),
+                  title: const Text('Este Mes'),
+                  trailing: Text('Bs. ${_sales['monthly_total']}', style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildAdminMachinesTab() {
+    final machines = (_machines['machines'] as List<dynamic>? ?? []);
+    return ListView(
+      children: [
+        ...machines.map((m) {
+          final machineId = m['id'] as String;
+          final inventory = _machineInventories[machineId] ?? [];
+
+          return Card(
+            margin: const EdgeInsets.only(bottom: 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.vending_machine, size: 40),
+                  title: Text(m['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('ID: $machineId | Estado: ${m['status']}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.bar_chart, color: Colors.orange),
+                        onPressed: () => _showStatsDialog(machineId),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.lightbulb, color: Colors.yellow),
+                        onPressed: () => _toggleLights(machineId),
+                      ),
+                    ],
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: Text('Distribución 4x4:', style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 4,
+                      childAspectRatio: 0.85,
+                      crossAxisSpacing: 10,
+                      mainAxisSpacing: 10,
+                    ),
+                    itemCount: inventory.length,
+                    itemBuilder: (context, i) {
+                      final item = inventory[i];
+                      final isEnabled = item['is_enabled'] ?? true;
+                      final type = item['slot_type'] ?? 'soda';
+
+                      return InkWell(
+                        onTap: () => _showEditSlotDialog(machineId, item),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: isEnabled ? Colors.white : Colors.grey[200],
+                            borderRadius: BorderRadius.circular(12),
+                            boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 4)],
+                            border: Border.all(
+                              color: isEnabled ? Colors.blue.withOpacity(0.5) : Colors.red.withOpacity(0.5),
+                              width: 2,
+                            ),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                type == 'soda' ? Icons.local_drink : Icons.fastfood,
+                                color: isEnabled ? Colors.blue : Colors.grey,
+                                size: 28,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(item['slot'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                              Text('Bs ${item['price']}', style: const TextStyle(fontSize: 9, color: Colors.green, fontWeight: FontWeight.bold)),
+                              if (!isEnabled)
+                                const Text('OFF', style: TextStyle(color: Colors.red, fontSize: 9, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
+      ],
+    );
+  }
+
+  Widget _buildAdminBannerTab() {
+    return ListView(
+      children: [
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('Publicidad para Clientes', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                const Text('Banner Actual:', style: TextStyle(color: Colors.grey)),
+                const SizedBox(height: 8),
+                if (_banner['url'] != null && _banner['url'].isNotEmpty)
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(8),
+                    child: Image.network(_banner['url'], height: 100, width: double.infinity, fit: BoxFit.cover),
+                  )
+                else
+                  const Text('No hay banner configurado'),
+                const SizedBox(height: 16),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: _showBannerConfigDialog,
+                    icon: const Icon(Icons.edit),
+                    label: const Text('Cambiar Imagen del Banner'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -307,69 +659,37 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> {
               ),
             ),
           ),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Anuncio',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8),
+                  if (_banner['url'] != null && _banner['url'].isNotEmpty)
+                    Image.network(
+                      _banner['url'],
+                      height: 80,
+                      width: double.infinity,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, __, ___) => const Text('Error al cargar banner'),
+                    )
+                  else
+                    const Text('No hay anuncios disponibles'),
+                ],
+              ),
+            ),
+          ),
         ],
       );
     }
 
     if (widget.role == 'ADMIN') {
-      final machines = (_machines['machines'] as List<dynamic>? ?? []);
-      return ListView(
-        children: [
-          Card(
-            child: ListTile(
-              title: const Text('Resumen de Ventas'),
-              subtitle: Text(
-                'Hoy: Bs. ${_sales['daily_total']} | Mes: Bs. ${_sales['monthly_total']}',
-              ),
-            ),
-          ),
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-            child: Text(
-              'Mis Máquinas',
-              style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-            ),
-          ),
-          ...machines.map((m) {
-            final machineId = m['id'] as String;
-            final inventory = _machineInventories[machineId] ?? [];
-
-            return Card(
-              child: ExpansionTile(
-                leading: Icon(
-                  Icons.vending_machine,
-                  color: m['status'] == 'online' ? Colors.green : Colors.grey,
-                ),
-                title: Text('${m['name']}'),
-                subtitle: Text('ID: $machineId | Estado: ${m['status']}'),
-                children: [
-                  const Divider(),
-                  ...inventory.map((item) {
-                    final productId = item['product_sku'] ?? item['product_id'];
-                    final productName = item['product_name'];
-                    final currentPrice = item['price'];
-                    final stock = item['stock'];
-
-                    return ListTile(
-                      title: Text('$productName ($productId)'),
-                      subtitle: Text('Stock: $stock | Precio: Bs. $currentPrice'),
-                      trailing: IconButton(
-                        icon: const Icon(Icons.edit, color: Colors.blue),
-                        onPressed: () => _showEditPriceDialog(machineId, item['slot'], productName, currentPrice),
-                      ),
-                    );
-                  }),
-                  if (inventory.isEmpty)
-                    const Padding(
-                      padding: EdgeInsets.all(8.0),
-                      child: Text('Sin productos en inventario'),
-                    ),
-                ],
-              ),
-            );
-          }),
-        ],
-      );
+        return const SizedBox.shrink(); // Admin is handled via TabBarView
     }
 
     final machines = (_machines['machines'] as List<dynamic>? ?? []);

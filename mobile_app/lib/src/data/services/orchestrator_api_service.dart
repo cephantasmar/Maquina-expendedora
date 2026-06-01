@@ -65,4 +65,24 @@ class OrchestratorApiService {
       Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/stats/distance-history'),
     );
   }
+
+
+  Future<Map<String, dynamic>> getTopSellers(String machineId) {
+    return _http.getJson(
+      Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/stats/top-sellers?machine_id=$machineId'),
+    );
+  }
+
+  Future<Map<String, dynamic>> toggleLights(String machineId) {
+    return _http.postJson(
+      Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/commands/$machineId/toggle-lights'),
+    );
+  }
+
+  Future<Map<String, dynamic>> refreshConfig(String machineId) {
+    return _http.postJson(
+      Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/commands/$machineId/refresh-config'),
+    );
+  }
 }
+

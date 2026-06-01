@@ -7,9 +7,11 @@ services:
       POSTGRES_PASSWORD: grog
       POSTGRES_DB: grog
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - grog-network
 
   mosquitto:
     image: eclipse-mosquitto:2
@@ -18,6 +20,8 @@ services:
       - "1883:1883"
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+    networks:
+      - grog-network
 
   auth-service:
     build: ./auth-service
@@ -27,6 +31,8 @@ services:
     command: sh -c "pip install --no-cache-dir bcrypt==4.0.1 && uvicorn app.main:app --host 0.0.0.0 --port 8030"
     depends_on:
       - postgres
+    networks:
+      - grog-network
 
   simupay-service:
     build: ./simupay-integration-service
@@ -36,6 +42,8 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8020
     depends_on:
       - postgres
+    networks:
+      - grog-network
 
   orchestrator-service:
     build: ./transaction-orchestrator-service
@@ -46,6 +54,8 @@ services:
     depends_on:
       - postgres
       - simupay-service
+    networks:
+      - grog-network
 
   vending-service:
     build: ./vending-service
@@ -55,6 +65,8 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8040
     depends_on:
       - postgres
+    networks:
+      - grog-network
 
   iot-service:
     build: ./iot-bridge-service
@@ -65,6 +77,23 @@ services:
     depends_on:
       - postgres
       - mosquitto
+    networks:
+      - grog-network
+
+  payment-gateway:
+    build: ../PaymentGateway-Service/api
+    ports:
+      - "8001:8001"
+    volumes:
+      - ../PaymentGateway-Service/api:/app
+    environment:
+      - INTERNAL_API_KEY=grog-simupay-secret
+    networks:
+      - grog-network
+
+networks:
+  grog-network:
+    driver: bridge
 
 volumes:
   pgdata:

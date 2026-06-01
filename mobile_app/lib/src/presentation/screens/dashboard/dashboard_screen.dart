@@ -6,12 +6,14 @@ import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../../../core/config/app_config.dart';
 import '../../controllers/auth_controller.dart';
 import '../../controllers/profile_controller.dart';
 import '../../controllers/purchase_controller.dart';
 import '../../controllers/wallet_controller.dart';
+import '../../controllers/admin_dashboard_controller.dart';
 import '../auth/login_screen.dart';
 import '../purchase/payment_confirmation_screen.dart';
 import '../purchase/qr_scanner_screen.dart';
@@ -63,6 +65,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     final targetEmail = session.simupayEmail ?? session.email;
     await wallet.load(targetEmail);
+    
+    // Cargar banner (a través del admin controller) para todos
+    if (context.mounted) {
+      context.read<AdminDashboardController>().loadStats();
+    }
   }
 
   @override
@@ -84,7 +91,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final isAdmin = session.role == 'ADMIN';
 
     return DefaultTabController(
-      length: isAdmin ? 2 : 1,
+      length: isAdmin ? 4 : 1,
       child: Scaffold(
         backgroundColor: const Color(0xFFF8F9FE),
         appBar: AppBar(
@@ -129,9 +136,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
           bottom:
               isAdmin
                   ? const TabBar(
+                    isScrollable: true,
                     tabs: [
                       Tab(text: 'Mi Billetera', icon: Icon(Icons.wallet)),
-                      Tab(text: 'Admin', icon: Icon(Icons.admin_panel_settings)),
+                      Tab(text: 'Ventas', icon: Icon(Icons.analytics)),
+                      Tab(text: 'Máquinas', icon: Icon(Icons.grid_view)),
+                      Tab(text: 'Publicidad', icon: Icon(Icons.campaign)),
                     ],
                     labelColor: Color(0xFF4F46E5),
                     unselectedLabelColor: Colors.grey,
@@ -144,11 +154,278 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 ? TabBarView(
                   children: [
                     _buildMainDashboard(context, profile, wallet, session, linked, walletInfo),
-                    const AdminPanelTab(),
+                    _buildAdminSalesTab(context),
+                    _buildAdminMachinesTab(context),
+                    _buildAdminBannerTab(context),
                   ],
                 )
                 : _buildMainDashboard(context, profile, wallet, session, linked, walletInfo),
       ),
+    );
+  }
+
+  Widget _buildAdminSalesTab(BuildContext context) {
+    return const AdminPanelTab();
+  }
+
+  Widget _buildAdminMachinesTab(BuildContext context) {
+    final controller = context.watch<AdminDashboardController>();
+    if (controller.machines.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
+        ...controller.machines.map((machine) {
+          final machineId = machine['id'];
+          final inventory = controller.inventories[machineId] ?? [];
+
+          return Card(
+            margin: const EdgeInsets.only(bottom: 24),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ListTile(
+                  leading: const CircleAvatar(
+                    backgroundColor: Color(0xFF4F46E5),
+                    child: Icon(Icons.settings_remote, color: Colors.white),
+                  ),
+                  title: Text(machine['name'], style: const TextStyle(fontWeight: FontWeight.bold)),
+                  subtitle: Text('ID: $machineId | Status: ${machine['status']}'),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.bar_chart, color: Colors.orange),
+                        onPressed: () => _showTopSellersDialog(context, controller, machineId),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.lightbulb_outline, color: Colors.amber),
+                        onPressed: () => controller.toggleLights(machineId),
+                      ),
+                    ],
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: Text('Distribución 4x4:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                ),
+                const SizedBox(height: 12),
+                Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 4,
+                      childAspectRatio: 0.8,
+                      crossAxisSpacing: 12,
+                      mainAxisSpacing: 12,
+                    ),
+                    itemCount: inventory.length,
+                    itemBuilder: (context, i) {
+                      final item = inventory[i];
+                      final isEnabled = item['is_enabled'] ?? true;
+                      final type = item['slot_type'] ?? 'soda';
+
+                      return InkWell(
+                        onTap: () => _showEditSlotDialog(context, controller, machineId, item),
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: isEnabled ? Colors.white : Colors.grey[100],
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: [
+                              BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 10, offset: const Offset(0, 4))
+                            ],
+                            border: Border.all(
+                              color: isEnabled ? const Color(0xFF4F46E5).withOpacity(0.3) : Colors.red.withOpacity(0.3),
+                              width: 2,
+                            ),
+                          ),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(
+                                type == 'soda' ? Icons.local_drink : Icons.fastfood,
+                                color: isEnabled ? const Color(0xFF4F46E5) : Colors.grey,
+                                size: 28,
+                              ),
+                              const SizedBox(height: 4),
+                              Text(item['slot'], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                              Text('Bs. ${item['price']}', style: const TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.bold)),
+                              if (!isEnabled)
+                                const Text('OFF', style: TextStyle(color: Colors.red, fontSize: 10, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        }),
+      ],
+    );
+  }
+
+  void _showEditSlotDialog(BuildContext context, AdminDashboardController controller, String machineId, dynamic item) {
+    final priceController = TextEditingController(text: item['price'].toString());
+    bool isEnabled = item['is_enabled'] ?? true;
+    String slotType = item['slot_type'] ?? 'soda';
+
+    showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: Text('Gestionar Slot ${item['slot']}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: priceController,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Precio (Bs.)', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 16),
+              SwitchListTile(
+                title: const Text('Habilitado'),
+                value: isEnabled,
+                onChanged: (v) => setModalState(() => isEnabled = v),
+              ),
+              const Text('Tipo de Producto:'),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  ChoiceChip(
+                    label: const Text('Soda'),
+                    selected: slotType == 'soda',
+                    onSelected: (v) => setModalState(() => slotType = 'soda'),
+                  ),
+                  const SizedBox(width: 8),
+                  ChoiceChip(
+                    label: const Text('Snack'),
+                    selected: slotType == 'snack',
+                    onSelected: (v) => setModalState(() => slotType = 'snack'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+            ElevatedButton(
+              onPressed: () async {
+                final price = double.tryParse(priceController.text);
+                if (price != null) {
+                  Navigator.pop(context);
+                  await controller.updatePrice(machineId, item['slot'], price);
+                  await controller.updateSlotStatus(machineId, item['slot'], isEnabled, slotType);
+                }
+              },
+              child: const Text('Guardar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showTopSellersDialog(BuildContext context, AdminDashboardController controller, String machineId) {
+    final stats = controller.topSellers[machineId] ?? [];
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Text('Lo más vendido'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: stats.isEmpty
+              ? const Text('No hay ventas registradas.')
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: stats.length,
+                  itemBuilder: (context, i) => ListTile(
+                    leading: CircleAvatar(child: Text('${i + 1}')),
+                    title: Text('Slot ${stats[i]['slot']}'),
+                    trailing: Text('${stats[i]['count']} ventas', style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cerrar')),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAdminBannerTab(BuildContext context) {
+    final controller = context.watch<AdminDashboardController>();
+    final bannerUrl = controller.banner['url'] ?? '';
+    final urlController = TextEditingController(text: bannerUrl);
+
+    return ListView(
+      padding: const EdgeInsets.all(24),
+      children: [
+        const Text('Banner Publicitario', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+        const Text('Este banner se mostrará a todos los clientes.', style: TextStyle(color: Colors.grey)),
+        const SizedBox(height: 24),
+        if (bannerUrl.isNotEmpty)
+          ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: bannerUrl.startsWith('data:') 
+              ? Image.memory(
+                  base64Decode(bannerUrl.split(',').last),
+                  height: 120, width: double.infinity, fit: BoxFit.cover,
+                )
+              : Image.network(bannerUrl, height: 120, width: double.infinity, fit: BoxFit.cover),
+          )
+        else
+          Container(
+            height: 120,
+            decoration: BoxDecoration(color: Colors.grey[200], borderRadius: BorderRadius.circular(20)),
+            child: const Center(child: Text('No hay imagen configurada')),
+          ),
+        const SizedBox(height: 24),
+        TextField(
+          controller: urlController,
+          decoration: const InputDecoration(labelText: 'URL de la imagen', border: OutlineInputBorder()),
+        ),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: () => controller.updateBanner(urlController.text),
+                icon: const Icon(Icons.link),
+                label: const Text('Usar URL'),
+                style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF4F46E5), foregroundColor: Colors.white),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: ElevatedButton.icon(
+                onPressed: () async {
+                  final picker = ImagePicker();
+                  final XFile? image = await picker.pickImage(source: ImageSource.gallery, maxWidth: 800);
+                  if (image != null) {
+                    final bytes = await image.readAsBytes();
+                    final base64Image = 'data:image/${image.path.split('.').last};base64,${base64Encode(bytes)}';
+                    await controller.updateBanner(base64Image);
+                  }
+                },
+                icon: const Icon(Icons.image),
+                label: const Text('Subir Imagen'),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal, foregroundColor: Colors.white),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -594,6 +871,41 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ],
           ),
+          
+          const SizedBox(height: 32),
+          // Banner Publicitario para Clientes
+          Consumer<AdminDashboardController>(
+            builder: (context, adminCtrl, _) {
+              final bannerUrl = adminCtrl.banner['url'] ?? '';
+              if (bannerUrl.isEmpty) return const SizedBox.shrink();
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Anuncio',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18, color: Colors.black87),
+                  ),
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(20),
+                    child: bannerUrl.startsWith('data:')
+                      ? Image.memory(
+                          base64Decode(bannerUrl.split(',').last),
+                          height: 100, width: double.infinity, fit: BoxFit.cover,
+                        )
+                      : Image.network(
+                          bannerUrl,
+                          height: 100,
+                          width: double.infinity,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                        ),
+                  ),
+                ],
+              );
+            },
+          ),
+          const SizedBox(height: 24),
         ],
       ),
     );

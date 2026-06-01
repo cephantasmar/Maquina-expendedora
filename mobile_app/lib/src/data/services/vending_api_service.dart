@@ -21,9 +21,28 @@ class VendingApiService {
   }
 
   Future<Map<String, dynamic>> updateInventoryPrice(String machineId, String slotOrId, double price) {
-    // Note: The backend uses query params for price in the PATCH request based on ApiClient implementation
     return _http.patchJson(
       Uri.parse('${AppConfig.vendingUrl}/api/v1/machines/$machineId/inventory/$slotOrId/price?price=$price'),
+    );
+  }
+
+  Future<Map<String, dynamic>> updateSlotStatus(String machineId, String slotOrId, bool isEnabled, String? slotType) {
+    return _http.patchJson(
+      Uri.parse('${AppConfig.vendingUrl}/api/v1/machines/$machineId/inventory/$slotOrId/status'),
+      body: {'is_enabled': isEnabled, 'slot_type': slotType},
+    );
+  }
+
+  Future<Map<String, dynamic>> getBanner() {
+    return _http.getJson(
+      Uri.parse('${AppConfig.vendingUrl}/api/v1/settings/banner'),
+    );
+  }
+
+  Future<Map<String, dynamic>> updateBanner(String url) {
+    return _http.postJson(
+      Uri.parse('${AppConfig.vendingUrl}/api/v1/admin/settings/banner'),
+      body: {'url': url},
     );
   }
 }
