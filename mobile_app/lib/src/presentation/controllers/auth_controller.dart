@@ -45,11 +45,29 @@ class AuthController extends ChangeNotifier {
         AppConfig.baseUrl = serverIp;
         await _authRepository.saveIp(serverIp);
       }
-      _session = await _authRepository.login(email: email, password: password);
+      final session = await _authRepository.login(email: email, password: password);
+      
+      // Validación estricta de roles
+      const allowedRoles = ['CLIENT', 'ADMIN', 'DEVOPS'];
+      if (!allowedRoles.contains(session.role.toUpperCase())) {
+        await _authRepository.logout();
+        throw Exception('Acceso denegado: El rol ${session.role} no tiene permisos.');
+      }
+      
+      _session = session;
       _error = null;
       return true;
     } catch (e) {
-      _error = e.toString();
+      final errorStr = e.toString().toLowerCase();
+      if (errorStr.contains('401') || errorStr.contains('invalid credentials') || errorStr.contains('contraseña incorrecta')) {
+        _error = 'Contraseña incorrecta. Por favor, verifica tus datos.';
+      } else if (errorStr.contains('404') || errorStr.contains('user not found') || errorStr.contains('usuario no encontrado')) {
+        _error = 'El usuario no existe. Regístrate para comenzar.';
+      } else if (errorStr.contains('socketexception') || errorStr.contains('connection refused')) {
+        _error = 'No se pudo conectar con el servidor. Verifica la IP y tu conexión.';
+      } else {
+        _error = e.toString().replaceFirst('Exception: ', '').replaceFirst('AppException: ', '');
+      }
       return false;
     } finally {
       _clearLoading();
@@ -68,15 +86,28 @@ class AuthController extends ChangeNotifier {
         AppConfig.baseUrl = serverIp;
         await _authRepository.saveIp(serverIp);
       }
-      _session = await _authRepository.register(
+      final session = await _authRepository.register(
         email: email,
         password: password,
         fullName: fullName,
       );
-      _error = null;
+
+      // Validación estricta de roles también en registro
+      const allowedRoles = ['CLIENT', 'ADMIN', 'DEVOPS'];
+      if (!allowedRoles.contains(session.role.toUpperCase())) {
+        await _authRepository.logout();
+        throw Exception('Registro fallido: Rol ${session.role} no permitido.');
+      }
+
+      _session = session;
       return true;
     } catch (e) {
-      _error = e.toString();
+      final errorStr = e.toString().toLowerCase();
+      if (errorStr.contains('409') || errorStr.contains('already exists')) {
+        _error = 'Este correo ya está registrado. Intenta iniciar sesión.';
+      } else {
+        _error = e.toString().replaceFirst('Exception: ', '').replaceFirst('AppException: ', '');
+      }
       return false;
     } finally {
       _clearLoading();

@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:nfc_manager/nfc_manager.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../../core/network/api_client.dart';
@@ -48,10 +49,128 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> with SingleTi
         ? TabController(length: 4, vsync: this)
         : null;
     _load();
+    if (widget.role == 'CLIENT') {
+      _startNfcSession();
+    }
+  }
+
+  Future<void> _startNfcSession() async {
+    try {
+      bool isAvailable = await NfcManager.instance.isAvailable();
+      if (!isAvailable) return;
+
+      NfcManager.instance.startSession(onDiscovered: (NfcTag tag) async {
+        try {
+          final ndef = Ndef.from(tag);
+          if (ndef == null || ndef.cachedMessage == null) return;
+          
+          String payload = '';
+          for (var record in ndef.cachedMessage!.records) {
+            if (record.typeNameFormat == NdefTypeNameFormat.nfcWellknown) {
+              if (record.payload.isNotEmpty) {
+                int langCodeLen = record.payload.first & 0x3F;
+                payload = utf8.decode(record.payload.sublist(langCodeLen + 1));
+              }
+            }
+          }
+
+          if (payload.isNotEmpty) {
+            final String machineId = payload.trim();
+            if (mounted) {
+              _showNfcPurchasePanel(machineId);
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      });
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  Future<void> _showNfcPurchasePanel(String machineId) async {
+    setState(() => _loading = true);
+    try {
+      final inv = await _api.inventory(machineId);
+      final items = inv['items'] as List<dynamic>? ?? [];
+      
+      if (!mounted) return;
+      showModalBottomSheet(
+        context: context,
+        isScrollControlled: true,
+        builder: (ctx) {
+          return Padding(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom,
+              top: 16, left: 16, right: 16,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('Máquina: $machineId', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                const Text('Selecciona un producto:'),
+                const SizedBox(height: 16),
+                if (items.isEmpty)
+                  const Text('No hay productos disponibles.')
+                else
+                  SizedBox(
+                    height: MediaQuery.of(ctx).size.height * 0.5,
+                    child: ListView.builder(
+                      itemCount: items.length,
+                      itemBuilder: (context, i) {
+                        final item = items[i];
+                        final isEnabled = item['is_enabled'] ?? true;
+                        if (!isEnabled) return const SizedBox();
+                        return ListTile(
+                          leading: const Icon(Icons.fastfood, color: Colors.blue),
+                          title: Text('${item['product_name']} (Slot ${item['slot']})'),
+                          trailing: Text('Bs. ${item['price']}'),
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            _buyProductFromNfc(machineId, item);
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                const SizedBox(height: 16),
+              ],
+            ),
+          );
+        }
+      );
+    } catch (e) {
+      setState(() => _info = 'Error leyendo máquina $machineId: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _buyProductFromNfc(String machineId, dynamic item) async {
+    try {
+      var tx = await _orchestrator.createTransaction(
+        userId: widget.email,
+        machineId: machineId,
+        productId: item['product_id'] ?? 'PROD-1',
+        amount: double.parse(item['price'].toString()),
+      );
+      tx = await _orchestrator.generateQr(tx.id);
+      setState(() {
+        _transactions.insert(0, tx);
+        _info = 'QR generado para ${item['product_name']} (tx: ${tx.id})';
+      });
+    } catch (e) {
+      setState(() => _info = e.toString());
+    }
   }
 
   @override
   void dispose() {
+    if (widget.role == 'CLIENT') {
+      NfcManager.instance.stopSession().catchError((_) {});
+    }
     _tabController?.dispose();
     super.dispose();
   }
@@ -88,8 +207,7 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> with SingleTi
 
         await prefs.setString('cache_admin_machines', jsonEncode(_machines));
         await prefs.setString('cache_admin_sales', jsonEncode(_sales));
-      }
- else {
+      } else if (widget.role == 'DEVOPS') {
         _machines = await _api.machines();
         _iot = await _api.iotMachines();
         await prefs.setString('cache_devops_machines', jsonEncode(_machines));
@@ -692,54 +810,58 @@ class _RoleDashboardScreenState extends State<RoleDashboardScreen> with SingleTi
         return const SizedBox.shrink(); // Admin is handled via TabBarView
     }
 
-    final machines = (_machines['machines'] as List<dynamic>? ?? []);
-    final iotMachines = (_iot['machines'] as List<dynamic>? ?? []);
-    return ListView(
-      children: [
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Vista global',
-                  style: TextStyle(fontWeight: FontWeight.bold),
-                ),
-                Text('Máquinas registradas: ${machines.length}'),
-                Text('Máquinas con telemetría: ${iotMachines.length}'),
-              ],
-            ),
-          ),
-        ),
-        ...iotMachines.map(
-          (m) => Card(
-            child: ListTile(
-              title: Text('${m['machine_id']} - ${m['status']}'),
-              subtitle: Text('temp=${m['temperature']} hum=${m['humidity']}'),
-              trailing: Wrap(
-                spacing: 8,
+    if (widget.role == 'DEVOPS') {
+      final machines = (_machines['machines'] as List<dynamic>? ?? []);
+      final iotMachines = (_iot['machines'] as List<dynamic>? ?? []);
+      return ListView(
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  TextButton(
-                    onPressed:
-                        () =>
-                            _devopsCommand(m['machine_id'] as String, 'homing'),
-                    child: const Text('Homing'),
+                  const Text(
+                    'Vista global (DEVOPS)',
+                    style: TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  TextButton(
-                    onPressed:
-                        () => _devopsCommand(
-                          m['machine_id'] as String,
-                          'restart',
-                        ),
-                    child: const Text('Restart'),
-                  ),
+                  Text('Máquinas registradas: ${machines.length}'),
+                  Text('Máquinas con telemetría: ${iotMachines.length}'),
                 ],
               ),
             ),
           ),
-        ),
-      ],
-    );
+          ...iotMachines.map(
+            (m) => Card(
+              child: ListTile(
+                title: Text('${m['machine_id']} - ${m['status']}'),
+                subtitle: Text('temp=${m['temperature']} hum=${m['humidity']}'),
+                trailing: Wrap(
+                  spacing: 8,
+                  children: [
+                    TextButton(
+                      onPressed:
+                          () =>
+                              _devopsCommand(m['machine_id'] as String, 'homing'),
+                      child: const Text('Homing'),
+                    ),
+                    TextButton(
+                      onPressed:
+                          () => _devopsCommand(
+                            m['machine_id'] as String,
+                            'restart',
+                          ),
+                      child: const Text('Restart'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      );
+    }
+
+    return const Center(child: Text('Acceso Denegado: Rol no reconocido'));
   }
 }

@@ -38,6 +38,10 @@ class _AdminPanelTabState extends State<AdminPanelTab> {
         children: [
           _buildSalesCard(controller.totalSales),
           const SizedBox(height: 24),
+          _buildTopSellersChart(controller.topSellers),
+          const SizedBox(height: 24),
+          _buildFailedSlotsChart(controller.failedSlots),
+          const SizedBox(height: 24),
           _buildInventoryManagement(controller),
           const SizedBox(height: 24),
           _buildQrOutcomeChart(controller.statusBreakdown),
@@ -46,6 +50,58 @@ class _AdminPanelTabState extends State<AdminPanelTab> {
           const SizedBox(height: 24),
           _buildDistanceDashboard(controller),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTopSellersChart(Map<String, List<dynamic>> topSellers) {
+    if (topSellers.isEmpty) return const SizedBox.shrink();
+    // Assuming one machine for now, simplify for UI demonstration
+    final data = topSellers.values.first; 
+    
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            const Text('Productos Más Vendidos', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 24),
+            SizedBox(
+              height: 200,
+              child: BarChart(
+                BarChartData(
+                  barGroups: data.asMap().entries.map((e) => BarChartGroupData(x: e.key, barRods: [BarChartRodData(toY: (e.value['count'] as num).toDouble(), color: Colors.blue)])).toList(),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFailedSlotsChart(Map<String, List<dynamic>> failedSlots) {
+    if (failedSlots.isEmpty) return const SizedBox.shrink();
+    // Assuming one machine for now
+    final data = failedSlots.values.first;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          children: [
+            const Text('Ranuras con Fallas', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 24),
+            SizedBox(
+              height: 200,
+              child: BarChart(
+                BarChartData(
+                  barGroups: data.asMap().entries.map((e) => BarChartGroupData(x: e.key, barRods: [BarChartRodData(toY: (e.value['count'] as num).toDouble(), color: Colors.red)])).toList(),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grog Vision Service Config</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; }
+        .container { display: flex; gap: 20px; }
+        .config-panel, .video-panel { background-color: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .config-panel { flex: 1; }
+        .video-panel { flex: 2; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], input[type="number"] {
+            width: calc(100% - 12px);
+            padding: 8px;
+            margin-bottom: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 15px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover { background-color: #45a049; }
+        #videoFeed {
+            width: 100%;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background-color: black;
+        }
+        .status { margin-top: 15px; padding: 10px; border-radius: 4px; }
+        .status.success { background-color: #d4edda; color: #155724; border-color: #c3e6cb; }
+        .status.error { background-color: #f8d7da; color: #721c24; border-color: #f5c6cb; }
+    </style>
+</head>
+<body>
+    <h1>Grog Vision Service Configuration</h1>
+
+    <div class="container">
+        <div class="config-panel">
+            <h2>Settings</h2>
+            <form id="configForm">
+                <label for="cameraUrl">Camera URL:</label>
+                <input type="text" id="cameraUrl" name="camera_url" placeholder="e.g., http://192.168.1.50:8080/video" required>
+
+                <h3>Region of Interest (ROI) - x, y, width, height</h3>
+                <input type="number" id="roiX" name="roi_x" placeholder="X" min="0" required>
+                <input type="number" id="roiY" name="roi_y" placeholder="Y" min="0" required>
+                <input type="number" id="roiW" name="roi_w" placeholder="Width" min="0" required>
+                <input type="number" id="roiH" name="roi_h" placeholder="Height" min="0" required>
+
+                <label for="threshold">Threshold (0-255):</label>
+                <input type="number" id="threshold" name="threshold" placeholder="e.g., 25" min="0" max="255" required>
+
+                <label for="minArea">Minimum Area for Detection:</label>
+                <input type="number" id="minArea" name="min_area" placeholder="e.g., 5000" min="0" required>
+
+                <button type="submit">Save Configuration</button>
+            </form>
+            <div id="statusMessage" class="status" style="display: none;"></div>
+            
+            <h2 style="margin-top: 30px;">Monitoring Control</h2>
+            <button id="startMonitoringBtn">Start Monitoring</button>
+            <button id="stopMonitoringBtn">Stop Monitoring</button>
+            <div id="monitoringStatus" style="margin-top: 10px; font-weight: bold;">Current Status: Not Monitoring</div>
+        </div>
+
+        <div class="video-panel">
+            <h2>Live Video Feed</h2>
+            <img id="videoFeed" src="/api/v1/vision/video_feed" alt="Live Video Feed">
+        </div>
+    </div>
+
+    <script>
+        const configForm = document.getElementById('configForm');
+        const statusMessage = document.getElementById('statusMessage');
+        const videoFeed = document.getElementById('videoFeed');
+        const startMonitoringBtn = document.getElementById('startMonitoringBtn');
+        const stopMonitoringBtn = document.getElementById('stopMonitoringBtn');
+        const monitoringStatus = document.getElementById('monitoringStatus');
+
+        // Function to fetch current configuration
+        async function fetchConfig() {
+            try {
+                const response = await fetch('/api/v1/vision/config');
+                if (response.ok) {
+                    const config = await response.json();
+                    document.getElementById('cameraUrl').value = config.camera_url;
+                    document.getElementById('roiX').value = config.roi[0];
+                    document.getElementById('roiY').value = config.roi[1];
+                    document.getElementById('roiW').value = config.roi[2];
+                    document.getElementById('roiH').value = config.roi[3];
+                    document.getElementById('threshold').value = config.threshold;
+                    document.getElementById('minArea').value = config.min_area;
+                } else {
+                    showStatus('Error fetching configuration.', 'error');
+                }
+            } catch (error) {
+                showStatus('Network error fetching configuration.', 'error');
+                console.error('Fetch config error:', error);
+            }
+        }
+
+        // Function to update monitoring status
+        async function updateMonitoringStatus() {
+            try {
+                const response = await fetch('/api/v1/vision/status');
+                if (response.ok) {
+                    const status = await response.json();
+                    if (status.is_monitoring) {
+                        monitoringStatus.textContent = `Current Status: MONITORING (TX: ${status.current_tx_id})`;
+                        monitoringStatus.style.color = 'green';
+                    } else {
+                        monitoringStatus.textContent = 'Current Status: Not Monitoring';
+                        monitoringStatus.style.color = 'black';
+                    }
+                }
+            } catch (error) {
+                console.error('Error updating monitoring status:', error);
+            }
+        }
+
+        // Display status messages
+        function showStatus(message, type) {
+            statusMessage.textContent = message;
+            statusMessage.className = `status ${type}`;
+            statusMessage.style.display = 'block';
+            setTimeout(() => statusMessage.style.display = 'none', 5000);
+        }
+
+        // Event listener for form submission
+        configForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(configForm);
+            const data = {
+                camera_url: formData.get('camera_url'),
+                roi: [
+                    parseInt(formData.get('roi_x')),
+                    parseInt(formData.get('roi_y')),
+                    parseInt(formData.get('roi_w')),
+                    parseInt(formData.get('roi_h'))
+                ],
+                threshold: parseInt(formData.get('threshold')),
+                min_area: parseInt(formData.get('min_area'))
+            };
+
+            try {
+                const response = await fetch('/api/v1/vision/config', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                });
+
+                if (response.ok) {
+                    showStatus('Configuration saved successfully!', 'success');
+                    // Reload video feed to apply new ROI if camera_url didn't change
+                    videoFeed.src = '/api/v1/vision/video_feed?' + new Date().getTime();
+                } else {
+                    const errorData = await response.json();
+                    showStatus(`Error saving configuration: ${errorData.detail || response.statusText}`, 'error');
+                }
+            } catch (error) {
+                showStatus('Network error saving configuration.', 'error');
+                console.error('Save config error:', error);
+            }
+        });
+
+        startMonitoringBtn.addEventListener('click', async () => {
+            // For manual start, we need a dummy tx_id
+            const dummyTxId = 'manual-tx-' + Date.now(); 
+            try {
+                const response = await fetch('/api/v1/vision/start-monitoring', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tx_id: dummyTxId, duration_seconds: 60 }) // Monitor for 60s
+                });
+                if (response.ok) {
+                    showStatus('Monitoring started manually.', 'success');
+                } else {
+                    const errorData = await response.json();
+                    showStatus(`Error starting monitoring: ${errorData.detail || response.statusText}`, 'error');
+                }
+            } catch (error) {
+                showStatus('Network error starting monitoring.', 'error');
+            } finally {
+                updateMonitoringStatus();
+            }
+        });
+
+        stopMonitoringBtn.addEventListener('click', async () => {
+            try {
+                const response = await fetch('/api/v1/vision/stop-monitoring', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (response.ok) {
+                    showStatus('Monitoring stopped.', 'success');
+                } else {
+                    const errorData = await response.json();
+                    showStatus(`Error stopping monitoring: ${errorData.detail || response.statusText}`, 'error');
+                }
+            } catch (error) {
+                showStatus('Network error stopping monitoring.', 'error');
+            } finally {
+                updateMonitoringStatus();
+            }
+        });
+
+        // Initial fetch of config and status
+        fetchConfig();
+        setInterval(updateMonitoringStatus, 2000); // Update status every 2 seconds
+    </script>
+</body>
+</html>

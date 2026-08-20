@@ -1,4 +1,5 @@
 import os
+import httpx
 from datetime import datetime, timedelta
 from uuid import uuid4
 
@@ -9,6 +10,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./iot.db")
 MQTT_BROKER_URL = os.getenv("MQTT_BROKER_URL", "mqtt://127.0.0.1:1883")
+NOTIFICATION_SERVICE_URL = os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8070")
+DEVOPS_EMAIL = os.getenv("DEVOPS_EMAIL", "devops@grog.com")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -112,6 +115,40 @@ def ingest_telemetry(req: TelemetryIn) -> dict:
             )
         )
         db.commit()
+
+    # Alertas para DEVOPS
+    alerts = []
+    if req.temperature > 30.0:
+        alerts.append({
+            "title": "🔥 Alerta de Alta Temperatura",
+            "summary": f"Sensor crítico en {req.machine_id}",
+            "description": f"La temperatura en la máquina {req.machine_id} ha subido a {req.temperature}°C. Peligro de daño en productos refrigerados.",
+            "type": "error"
+        })
+    
+    if req.motor_status != "OK":
+        alerts.append({
+            "title": "⚙️ Fallo en Motor",
+            "summary": f"Atasco detectado en {req.machine_id}",
+            "description": f"Se ha detectado un estado de motor '{req.motor_status}' en la máquina {req.machine_id}. Requiere revisión física.",
+            "type": "warning"
+        })
+
+    if alerts:
+        try:
+            with httpx.Client() as client:
+                for alert in alerts:
+                    client.post(
+                        f"{NOTIFICATION_SERVICE_URL}/api/v1/notifications/send",
+                        json={
+                            "user_email": DEVOPS_EMAIL,
+                            **alert
+                        },
+                        timeout=2.0
+                    )
+        except Exception as e:
+            print(f"ERROR sending IoT notification: {e}")
+
     return {"status": "stored"}
 
 

@@ -12,6 +12,11 @@ services:
       - pgdata:/var/lib/postgresql/data
     networks:
       - grog-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grog -d grog"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   mosquitto:
     image: eclipse-mosquitto:2
@@ -30,7 +35,8 @@ services:
       - "8030:8030"
     command: sh -c "pip install --no-cache-dir bcrypt==4.0.1 && uvicorn app.main:app --host 0.0.0.0 --port 8030"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - grog-network
 
@@ -41,7 +47,8 @@ services:
       - "8020:8020"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8020
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - grog-network
 
@@ -52,8 +59,10 @@ services:
       - "8010:8010"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8010
     depends_on:
-      - postgres
-      - simupay-service
+      postgres:
+        condition: service_healthy
+      simupay-service:
+        condition: service_started
     networks:
       - grog-network
 
@@ -64,7 +73,8 @@ services:
       - "8040:8040"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8040
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     networks:
       - grog-network
 
@@ -75,8 +85,20 @@ services:
       - "8050:8050"
     command: uvicorn app.main:app --host 0.0.0.0 --port 8050
     depends_on:
-      - postgres
-      - mosquitto
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    networks:
+      - grog-network
+
+
+
+  notification-service:
+    build: ./notification-service
+    ports:
+      - "8070:8070"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8070
     networks:
       - grog-network
 

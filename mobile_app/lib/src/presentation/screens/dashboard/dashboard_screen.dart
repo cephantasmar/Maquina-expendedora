@@ -21,7 +21,11 @@ import '../profile/profile_screen.dart';
 import '../wallet/history_screen.dart';
 import '../wallet/transfer_screen.dart';
 import '../../../domain/entities/auth_session.dart';
+import '../../controllers/notification_controller.dart';
+import '../notifications/notification_screens.dart';
 import 'admin_panel_tab.dart';
+import 'devops_panel_tab.dart';
+import '../settings/settings_screen.dart';
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -66,6 +70,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final targetEmail = session.simupayEmail ?? session.email;
     await wallet.load(targetEmail);
     
+    if (context.mounted) {
+      context.read<NotificationController>().loadNotifications(session.email);
+    }
+    
     // Cargar banner (a través del admin controller) para todos
     if (context.mounted) {
       context.read<AdminDashboardController>().loadStats();
@@ -89,9 +97,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final walletInfo = wallet.wallet;
     final linked = walletInfo?.linked ?? false;
     final isAdmin = session.role == 'ADMIN';
+    final isDevOps = session.role == 'DEVOPS';
 
     return DefaultTabController(
-      length: isAdmin ? 4 : 1,
+      length: isAdmin ? 4 : (isDevOps ? 2 : 1),
       child: Scaffold(
         backgroundColor: const Color(0xFFF8F9FE),
         appBar: AppBar(
@@ -110,12 +119,62 @@ class _DashboardScreenState extends State<DashboardScreen> {
               onPressed: _load,
               icon: const Icon(Icons.refresh, color: Colors.black54),
             ),
+            Consumer<NotificationController>(
+              builder: (context, ctrl, _) => Stack(
+                alignment: Alignment.center,
+                children: [
+                  IconButton(
+                    onPressed: () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(builder: (_) => const NotificationListScreen()),
+                      );
+                    },
+                    icon: const Icon(Icons.notifications_outlined, color: Colors.black54),
+                  ),
+                  if (ctrl.unreadCount > 0)
+                    Positioned(
+                      right: 8,
+                      top: 8,
+                      child: Container(
+                        padding: const EdgeInsets.all(2),
+                        decoration: BoxDecoration(
+                          color: Colors.red,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        constraints: const BoxConstraints(
+                          minWidth: 16,
+                          minHeight: 16,
+                        ),
+                        child: Text(
+                          '${ctrl.unreadCount}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
             IconButton(
               onPressed: () {
                 Navigator.of(
                   context,
                 ).push(
                   MaterialPageRoute(builder: (_) => const ProfileScreen()),
+                );
+              },
+              icon: const Icon(Icons.person_outline, color: Colors.black54),
+            ),
+            IconButton(
+              onPressed: () {
+                Navigator.of(
+                  context,
+                ).push(
+                  MaterialPageRoute(builder: (_) => const SettingsScreen()),
                 );
               },
               icon: const Icon(Icons.settings_outlined, color: Colors.black54),
@@ -147,19 +206,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
                     unselectedLabelColor: Colors.grey,
                     indicatorColor: Color(0xFF4F46E5),
                   )
-                  : null,
+                  : (isDevOps
+                      ? const TabBar(
+                          tabs: [
+                            Tab(text: 'IoT Telemetría', icon: Icon(Icons.sensors)),
+                            Tab(text: 'Máquinas', icon: Icon(Icons.settings_remote)),
+                          ],
+                          labelColor: Color(0xFF4F46E5),
+                          unselectedLabelColor: Colors.grey,
+                          indicatorColor: Color(0xFF4F46E5),
+                        )
+                      : null),
         ),
-        body:
-            isAdmin
+        body: isAdmin
+            ? TabBarView(
+                children: [
+                  _buildMainDashboard(context, profile, wallet, session, linked, walletInfo),
+                  _buildAdminSalesTab(context),
+                  _buildAdminMachinesTab(context),
+                  _buildAdminBannerTab(context),
+                ],
+              )
+            : (isDevOps
                 ? TabBarView(
-                  children: [
-                    _buildMainDashboard(context, profile, wallet, session, linked, walletInfo),
-                    _buildAdminSalesTab(context),
-                    _buildAdminMachinesTab(context),
-                    _buildAdminBannerTab(context),
-                  ],
-                )
-                : _buildMainDashboard(context, profile, wallet, session, linked, walletInfo),
+                    children: [
+                      const DevOpsPanelTab(),
+                      _buildAdminMachinesTab(context),
+                    ],
+                  )
+                : _buildMainDashboard(context, profile, wallet, session, linked, walletInfo)),
       ),
     );
   }

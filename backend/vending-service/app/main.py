@@ -1,13 +1,15 @@
 import os
+import httpx
 from datetime import datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import DateTime, Float, Integer, String, create_engine
+from sqlalchemy import DateTime, Float, Integer, String, Text, create_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./vending.db")
+NOTIFICATION_SERVICE_URL = os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8070")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -246,8 +248,30 @@ def update_inventory(inventory_id: str, req: InventoryUpdateRequest) -> dict:
         row = db.get(Inventory, inventory_id)
         if not row:
             raise HTTPException(status_code=404, detail="Inventory not found")
+        
         row.stock = req.stock
         row.capacity = req.capacity
+        
+        # Alerta de Stock Bajo
+        if row.stock < 3:
+            machine = db.get(Machine, row.machine_id)
+            if machine:
+                try:
+                    with httpx.Client() as client:
+                        client.post(
+                            f"{NOTIFICATION_SERVICE_URL}/api/v1/notifications/send",
+                            json={
+                                "user_email": machine.owner_email,
+                                "title": "⚠️ Alerta de Stock Bajo",
+                                "summary": f"Slot {row.slot} casi vacío en {machine.name}",
+                                "description": f"La máquina {machine.name} (ID: {machine.id}) tiene solo {row.stock} unidades en el slot {row.slot}. Por favor, reabastecer pronto.",
+                                "type": "warning"
+                            },
+                            timeout=2.0
+                        )
+                except Exception as e:
+                    print(f"ERROR sending stock notification: {e}")
+
         db.commit()
         return {"status": "updated", "inventory_id": inventory_id}
 

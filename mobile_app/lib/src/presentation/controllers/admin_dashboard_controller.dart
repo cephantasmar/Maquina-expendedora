@@ -1,10 +1,12 @@
 import 'package:flutter/foundation.dart';
 import '../../data/services/orchestrator_api_service.dart';
 import '../../data/services/vending_api_service.dart';
+import '../../data/services/iot_api_service.dart';
 
 class AdminDashboardController extends ChangeNotifier {
   final OrchestratorApiService _api;
   final VendingApiService _vendingApi;
+  final IotApiService _iotApi;
 
   bool loading = false;
   String? error;
@@ -15,15 +17,19 @@ class AdminDashboardController extends ChangeNotifier {
   List<Map<String, dynamic>> distanceHistory = [];
   
   List<dynamic> machines = [];
+  List<dynamic> iotMachines = [];
   Map<String, List<dynamic>> inventories = {};
   Map<String, List<dynamic>> topSellers = {};
+  Map<String, List<dynamic>> failedSlots = {};
   Map<String, dynamic> banner = {};
 
   AdminDashboardController({
     OrchestratorApiService? api,
     VendingApiService? vendingApi,
+    IotApiService? iotApi,
   }) : _api = api ?? OrchestratorApiService(),
-       _vendingApi = vendingApi ?? VendingApiService();
+       _vendingApi = vendingApi ?? VendingApiService(),
+       _iotApi = iotApi ?? IotApiService();
 
   Future<void> loadStats() async {
     loading = true;
@@ -40,6 +46,10 @@ class AdminDashboardController extends ChangeNotifier {
       // Load machines
       final machinesData = await _vendingApi.listMachines();
       machines = machinesData['machines'] ?? [];
+
+      // Load IoT machines for DEVOPS/Support
+      final iotData = await _iotApi.listIotMachines();
+      iotMachines = iotData['machines'] ?? [];
       
       // Load inventories and stats for all machines
       for (var machine in machines) {
@@ -49,9 +59,30 @@ class AdminDashboardController extends ChangeNotifier {
         
         final topSellersData = await _api.getTopSellers(machineId);
         topSellers[machineId] = List<Map<String, dynamic>>.from(topSellersData['items'] ?? []);
+
+        final failedSlotsData = await _api.getFailedSlots(machineId);
+        failedSlots[machineId] = List<Map<String, dynamic>>.from(failedSlotsData['items'] ?? []);
       }
       
       notifyListeners();
+    } catch (e) {
+      error = e.toString();
+    } finally {
+      loading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> sendIotCommand(String machineId, String command) async {
+    loading = true;
+    error = null;
+    notifyListeners();
+
+    try {
+      await _iotApi.sendCommand(machineId, command);
+      // Recargar telemetría después de un comando si es necesario
+      final iotData = await _iotApi.listIotMachines();
+      iotMachines = iotData['machines'] ?? [];
     } catch (e) {
       error = e.toString();
     } finally {

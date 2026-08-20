@@ -10,7 +10,6 @@
 TFT_eSPI tft = TFT_eSPI();
 Preferences preferences; // Objeto para manejar la memoria
 
-// ================= CONFIGURACION HARDWARE =================
 const byte ROWS = 4, COLS = 4;
 char keys[ROWS][COLS] = {
   {'1','2','3','A'},
@@ -39,7 +38,7 @@ DHT dht(DHTPIN, DHTTYPE);
 
 float distanciaInicial = 0.0, distanciaFinal = 0.0;
 float prevM1 = 0.0, prevM2 = 0.0;
-const float UMBRAL_CAIDA_CM = 5.0; 
+const float UMBRAL_CAIDA_CM = 3.0; 
 // ==========================================================
 
 // ================= CONFIGURACION SISTEMA ==================
@@ -149,14 +148,14 @@ float medirDistancia() {
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
   
-  // Aumentamos un poco el timeout a 30000ms (~5 metros)
-  long duration = pulseIn(ECHO_PIN, HIGH, 30000); 
+  // Timeout reducido para máxima velocidad de muestreo
+  long duration = pulseIn(ECHO_PIN, HIGH, 5000); 
   
   if (duration == 0) {
     // Si da 0, intentamos una vez más tras un pequeño delay
-    delay(10);
+    delayMicroseconds(200);
     digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10); digitalWrite(TRIG_PIN, LOW);
-    duration = pulseIn(ECHO_PIN, HIGH, 30000);
+    duration = pulseIn(ECHO_PIN, HIGH, 5000);
   }
 
   float cm = (duration * 0.0343) / 2.0;
@@ -268,7 +267,7 @@ void mostrarCatalogo() {
   tft.drawFastHLine(0, tft.height()-45, tft.width(), TFT_DARKGREY);
   tft.setTextSize(1); tft.setTextColor(TFT_LIGHTGREY); 
   tft.setCursor(10, tft.height()-35); tft.print("D: COMPRAR   *: LIMPIAR");
-  tft.setCursor(10, tft.height()-20); tft.print("C: CONFIG IP (Mantener)");
+  tft.setCursor(10, tft.height()-20); tft.print("CODIGOS: A1-A3, A7, C1-C3, C7");
   
   dibujarMonitores();
 }
@@ -374,8 +373,6 @@ void processPaidTransaction(String txId) {
   tft.println("PAGO CONFIRMADO"); 
   tft.setTextColor(TFT_WHITE); tft.println("INICIANDO MOTOR...");
 
-  digitalWrite(LED_PIN, HIGH);
-
   // 1. MANDAR SEÑAL AL ESCLAVO
   Serial.printf("[SLAVE] >>> Enviando MOVE:%s\n", inputCodigo.c_str());
   Serial2.println("MOVE:" + inputCodigo);
@@ -476,7 +473,6 @@ void processPaidTransaction(String txId) {
     http.end();
   }
 
-  digitalWrite(LED_PIN, LOW);
   Serial.println("[SYSTEM] --- FIN DEL PROCESO ---\n");
   dibujarMonitores();
   delay(3000);
@@ -544,6 +540,8 @@ void setup() {
   webhookServer.on("/command", HTTP_POST, [](){
     String cmd = webhookServer.arg("command");
     if (cmd == "toggle_lights") { toggleLights(); }
+    else if (cmd == "lights_on") { lightsOn = false; toggleLights(); }
+    else if (cmd == "lights_off") { lightsOn = true; toggleLights(); }
     webhookServer.send(200, "application/json", "{\"ok\":true}");
   });
 
@@ -596,6 +594,12 @@ void loop() {
           if (payload.indexOf("toggle_lights") != -1) {
             toggleLights();
           }
+          if (payload.indexOf("lights_on") != -1) {
+            lightsOn = false; toggleLights();
+          }
+          if (payload.indexOf("lights_off") != -1) {
+            lightsOn = true; toggleLights();
+          }
           if (payload.indexOf("refresh_inventory_config") != -1) {
             mostrarCatalogo();
           }
@@ -613,15 +617,11 @@ void loop() {
     if (key == 'D') { 
       if (inputCodigo.length() > 0) registrarIntencionYMostrarQR(); 
     }
-    else if (key == 'C') { // MANTENER PARA CONFIG IP
-       pedirIP();
-       ESP.restart(); 
-    }
-    else if (key == '*') { // SOLO '*' PARA CANCELAR/LIMPIAR
+    else if (key == '*') { 
        resetState(); 
     }
     else {
-      // AHORA 'A' Y 'B' SE GUARDAN EN EL CODIGO (Ej: A1)
+      // 'A', 'B', 'C' y números se guardan en el código
       inputCodigo += key;
       tft.fillRect(10, 180, 180, 40, TFT_NAVY); tft.drawRect(10, 180, 180, 40, TFT_WHITE);
       tft.setCursor(20, 190); tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.print("COD: "); tft.print(inputCodigo);

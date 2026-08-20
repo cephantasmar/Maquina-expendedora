@@ -73,6 +73,12 @@ class OrchestratorApiService {
     );
   }
 
+  Future<Map<String, dynamic>> getFailedSlots(String machineId) {
+    return _http.getJson(
+      Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/stats/failed-slots?machine_id=$machineId'),
+    );
+  }
+
   Future<Map<String, dynamic>> toggleLights(String machineId) {
     return _http.postJson(
       Uri.parse('${AppConfig.orchestratorUrl}/api/v1/admin/commands/$machineId/toggle-lights'),

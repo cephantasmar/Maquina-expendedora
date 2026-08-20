@@ -1,39 +1,52 @@
 /**
- * ESP32 SLAVE - CONTROL DE MOTORES PAP (STEPPER)
+ * ESP32 SLAVE - CONTROL RIGUROSO DE MOTORES PAP (8 CANALES)
+ * -------------------------------------------------------
  * Recibe comandos por Serial2 del ESP32 Maestro.
- * Controla 8 drivers A4988/DRV8825.
+ * Optimizaciones: 
+ *   - Gestión de calor activa (Enable/Disable por ciclo).
+ *   - Mapeo de slots sincronizado con UI Maestro.
+ *   - Torque máximo con retardos controlados.
  */
 
-// ================= CONFIGURACION PINES =================
-const int PIN_ENABLE = 4; // ENABLE compartido para todos los motores
+// ================= CONFIGURACIÓN DE HARDWARE =================
+const int PIN_ENABLE = 4; // ENABLE común para todos los drivers (Activo en LOW)
 
-// Estructura para definir los pines de cada motor
 struct Stepper {
   int stepPin;
   int dirPin;
 };
 
-// Mapeo de 8 motores
+// Mapeo físico de 8 motores (No cambiar pines a menos que cambie el cableado)
 Stepper motors[8] = {
-  {5,  18}, // Motor 1 (Ej: Slot A1)
-  {19, 21}, // Motor 2 (Ej: Slot A2)
-  {22, 23}, // Motor 3
-  {25, 26}, // Motor 4
-  {27, 32}, // Motor 5
-  {33, 12}, // Motor 6
-  {13, 14}, // Motor 7
-  {2,  15}  // Motor 8
+  {5,  18}, // Motor 1 -> Slot A1
+  {19, 21}, // Motor 2 -> Slot A2
+  {22, 23}, // Motor 3 -> Slot A3
+  {25, 26}, // Motor 4 -> Slot A7
+  {27, 32}, // Motor 5 -> Slot C1
+  {33, 12}, // Motor 6 -> Slot C2
+  {13, 14}, // Motor 7 -> Slot C3
+  {2,  15}  // Motor 8 -> Slot C7
 };
 
-const int STEPS_PER_REV = 200; // Ajustar según el motor (200 es común para 1.8°)
-const int STEP_DELAY_US = 6000; // Velocidad del motor (menor = más rápido)
+// Parámetros de movimiento
+const int STEPS_PER_REV = 200;  // 1.8 grados por paso
+const int STEP_DELAY_US = 3000; // Velocidad equilibrada para torque
+const int START_DELAY_MS = 100; // Estabilización antes de giro
+const int END_HOLD_MS = 200;    // Retención para evitar retroceso de resorte
 
 void setup() {
+  // Comunicación para depuración
   Serial.begin(115200);
-  Serial2.begin(9600, SERIAL_8N1, 16, 17); // RX=16, TX=17
   
+  // Comunicación con Maestro (RX2=16, TX2=17)
+  Serial2.begin(9600, SERIAL_8N1, 16, 17);
+  
+  delay(1000);
+  Serial.println("--- ESCLAVO MOTORES INICIADO ---");
+
+  // Configuración de pines
   pinMode(PIN_ENABLE, OUTPUT);
-  digitalWrite(PIN_ENABLE, HIGH); // Motores desactivados por defecto (Low active en A4988)
+  digitalWrite(PIN_ENABLE, HIGH); // Iniciar DESHABILITADO (Frio)
 
   for (int i = 0; i < 8; i++) {
     pinMode(motors[i].stepPin, OUTPUT);
@@ -41,24 +54,24 @@ void setup() {
     digitalWrite(motors[i].stepPin, LOW);
     digitalWrite(motors[i].dirPin, LOW);
   }
-
-  Serial.println("--- ESCLAVO MOTORES INICIADO ---");
 }
 
-void girarMotor(int index) {
+/**
+ * Ejecuta el giro físico de un motor específico
+ */
+void ejecutarGiro(int index, bool horario = true) {
   if (index < 0 || index >= 8) return;
 
-  Serial.printf("[MOTOR] Girando motor #%d con torque máximo...\n", index + 1);
+  Serial.printf("[ACCION] Girando motor físico #%d (%s)\n", index + 1, horario ? "Horario" : "Anti-horario");
   
-  // 1. Activar drivers y esperar un momento para estabilizar corriente
+  // 1. Activar torque
   digitalWrite(PIN_ENABLE, LOW); 
-  delay(50); // Aumentado para asegurar torque inicial
+  delay(START_DELAY_MS); 
 
   // 2. Establecer dirección
-  digitalWrite(motors[index].dirPin, HIGH);
+  digitalWrite(motors[index].dirPin, horario ? HIGH : LOW);
 
-  // 3. Dar una revolución completa (200 pasos)
-  // Usamos un micro-delay un poco más alto para máxima fuerza
+  // 3. Ciclo de pasos
   for (int x = 0; x < STEPS_PER_REV; x++) {
     digitalWrite(motors[index].stepPin, HIGH);
     delayMicroseconds(STEP_DELAY_US);
@@ -66,12 +79,11 @@ void girarMotor(int index) {
     delayMicroseconds(STEP_DELAY_US);
   }
 
-  // 4. Mantener el motor bloqueado un instante para evitar que el resorte retroceda
-  delay(200); 
+  delay(END_HOLD_MS); 
   
-  // 5. Desactivar drivers
+  // 5. Liberar torque para enfriar
   digitalWrite(PIN_ENABLE, HIGH); 
-  Serial.println("[MOTOR] Giro completado.");
+  Serial.println("[OK] Giro completado y motor liberado.");
 }
 
 void loop() {
@@ -81,33 +93,29 @@ void loop() {
     
     if (cmd.length() == 0) return;
 
-    Serial.printf("[COMM] Recibido: '%s'\n", cmd.c_str());
+    Serial.printf("[RX] Comando recibido: '%s'\n", cmd.c_str());
 
     if (cmd.startsWith("MOVE:")) {
       String code = cmd.substring(5);
-      Serial.printf("[ACTION] Procesando MOVE para: %s\n", code.c_str());
-      
       int motorIndex = -1;
+      bool dir = true; 
       
-      if (code == "1" || code == "A1") motorIndex = 0;
-      else if (code == "2" || code == "A2") motorIndex = 1;
-      else if (code == "3" || code == "A3") motorIndex = 2;
-      else if (code == "4" || code == "A4") motorIndex = 3;
-      else if (code == "5" || code == "B1") motorIndex = 4;
-      else if (code == "6" || code == "B2") motorIndex = 5;
-      else if (code == "7" || code == "B3") motorIndex = 6;
-      else if (code == "8" || code == "B4") motorIndex = 7;
+      if      (code == "A1") { motorIndex = 0; dir = false; }
+      else if (code == "A2") motorIndex = 1;
+      else if (code == "A3") { motorIndex = 2; dir = false; } 
+      else if (code == "A7") motorIndex = 3;
+      else if (code == "C1") motorIndex = 4;
+      else if (code == "C2") motorIndex = 5;
+      else if (code == "C3") motorIndex = 6;
+      else if (code == "C7") motorIndex = 7;
 
       if (motorIndex != -1) {
-        Serial.printf("[MOTOR] Girando motor físico #%d\n", motorIndex + 1);
-        girarMotor(motorIndex);
-        Serial2.println("DONE");
-        Serial.println("[COMM] OK: 'DONE' enviado al Maestro");
+        ejecutarGiro(motorIndex, dir);
+        Serial2.println("DONE"); 
+        Serial.println("[TX] Notificación 'DONE' enviada.");
       } else {
-        Serial.printf("[ERROR] Código '%s' no reconocido.\n", code.c_str());
+        Serial.printf("[ERROR] Código de slot '%s' inválido.\n", code.c_str());
       }
-    } else {
-      Serial.printf("[WARN] Comando desconocido: '%s'\n", cmd.c_str());
     }
   }
 }

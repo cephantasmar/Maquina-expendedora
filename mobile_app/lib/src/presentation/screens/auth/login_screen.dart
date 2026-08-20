@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:local_auth/local_auth.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 
 import '../../../core/config/app_config.dart';
@@ -19,6 +22,52 @@ class _LoginScreenState extends State<LoginScreen> {
   final _ipCtrl = TextEditingController(text: AppConfig.baseUrl);
   final _formKey = GlobalKey<FormState>();
 
+  final LocalAuthentication _localAuth = LocalAuthentication();
+  final FlutterSecureStorage _secureStorage = const FlutterSecureStorage();
+
+  bool _rememberPassword = false;
+  bool _fingerprintAvailable = false;
+  bool _fingerprintEnabled = false;
+  bool _hasSavedCredentials = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedState();
+  }
+
+  Future<void> _loadSavedState() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedEmail = await _secureStorage.read(key: 'saved_email');
+    final savedPassword = await _secureStorage.read(key: 'saved_password');
+    final savedIp = await _secureStorage.read(key: 'saved_ip');
+
+    bool fingerAvailable = false;
+    try {
+      fingerAvailable = await _localAuth.canCheckBiometrics || await _localAuth.isDeviceSupported();
+    } catch (_) {}
+
+    final fingerEnabled = prefs.getBool('fingerprint_enabled') ?? false;
+    final hasCreds = savedEmail != null && savedPassword != null;
+
+    if (mounted) {
+      setState(() {
+        _fingerprintAvailable = fingerAvailable;
+        _fingerprintEnabled = fingerEnabled;
+        _hasSavedCredentials = hasCreds;
+
+        if (hasCreds) {
+          _emailCtrl.text = savedEmail!;
+          _passwordCtrl.text = savedPassword!;
+          _rememberPassword = true;
+        }
+        if (savedIp != null) {
+          _ipCtrl.text = savedIp;
+        }
+      });
+    }
+  }
+
   @override
   void dispose() {
     _emailCtrl.dispose();
@@ -36,7 +85,19 @@ class _LoginScreenState extends State<LoginScreen> {
       serverIp: _ipCtrl.text.trim(),
     );
     if (!mounted) return;
+
     if (ok) {
+      // Save or clear credentials based on checkbox
+      if (_rememberPassword) {
+        await _secureStorage.write(key: 'saved_email', value: _emailCtrl.text.trim());
+        await _secureStorage.write(key: 'saved_password', value: _passwordCtrl.text.trim());
+        await _secureStorage.write(key: 'saved_ip', value: _ipCtrl.text.trim());
+      } else {
+        await _secureStorage.delete(key: 'saved_email');
+        await _secureStorage.delete(key: 'saved_password');
+        await _secureStorage.delete(key: 'saved_ip');
+      }
+
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const DashboardScreen()),
       );
@@ -51,10 +112,42 @@ class _LoginScreenState extends State<LoginScreen> {
     );
   }
 
+  Future<void> _loginWithFingerprint() async {
+    try {
+      final authenticated = await _localAuth.authenticate(
+        localizedReason: 'Escanea tu huella dactilar para iniciar sesión',
+        biometricOnly: true,
+        persistAcrossBackgrounding: true,
+      );
+
+      if (!authenticated) return;
+
+      final savedEmail = await _secureStorage.read(key: 'saved_email');
+      final savedPassword = await _secureStorage.read(key: 'saved_password');
+      final savedIp = await _secureStorage.read(key: 'saved_ip');
+
+      if (savedEmail != null && savedPassword != null) {
+        setState(() {
+          _emailCtrl.text = savedEmail;
+          _passwordCtrl.text = savedPassword;
+          if (savedIp != null) _ipCtrl.text = savedIp;
+        });
+        await _submit();
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final auth = context.watch<AuthController>();
     final theme = Theme.of(context);
+    final showFingerprintButton = _fingerprintAvailable && _fingerprintEnabled && _hasSavedCredentials;
 
     return Scaffold(
       backgroundColor: Colors.white,
@@ -165,7 +258,32 @@ class _LoginScreenState extends State<LoginScreen> {
                                   ? 'Mínimo 6 caracteres'
                                   : null,
                     ),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 8),
+
+                    // Checkbox: Recordar contraseña
+                    Row(
+                      children: [
+                        SizedBox(
+                          height: 24,
+                          width: 24,
+                          child: Checkbox(
+                            value: _rememberPassword,
+                            onChanged: (v) => setState(() => _rememberPassword = v ?? false),
+                            activeColor: const Color(0xFF4F46E5),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        GestureDetector(
+                          onTap: () => setState(() => _rememberPassword = !_rememberPassword),
+                          child: const Text(
+                            'Recordar contraseña',
+                            style: TextStyle(fontSize: 14, color: Colors.black87),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 20),
                     ElevatedButton(
                       onPressed: auth.loading ? null : _submit,
                       style: ElevatedButton.styleFrom(
@@ -195,6 +313,25 @@ class _LoginScreenState extends State<LoginScreen> {
                                 ),
                               ),
                     ),
+
+                    // Botón huella dactilar
+                    if (showFingerprintButton) ...[
+                      const SizedBox(height: 16),
+                      OutlinedButton.icon(
+                        onPressed: auth.loading ? null : _loginWithFingerprint,
+                        icon: const Icon(Icons.fingerprint, size: 28),
+                        label: const Text('Iniciar sesión con huella'),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          side: const BorderSide(color: Color(0xFF4F46E5)),
+                          foregroundColor: const Color(0xFF4F46E5),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ],
+
                     const SizedBox(height: 16),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,

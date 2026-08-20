@@ -1,7 +1,7 @@
 import enum
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 from fastapi import FastAPI, HTTPException, Header, Request
@@ -12,9 +12,11 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orchestrator.db")
 SIMUPAY_INTEGRATION_URL = os.getenv("SIMUPAY_INTEGRATION_URL", "http://simupay-service:8020")
 VENDING_SERVICE_URL = os.getenv("VENDING_SERVICE_URL", "http://vending-service:8040")
+NOTIFICATION_SERVICE_URL = os.getenv("NOTIFICATION_SERVICE_URL", "http://notification-service:8070")
 IOT_WEBHOOK_ENABLED = os.getenv("IOT_WEBHOOK_ENABLED", "false").lower() == "true"
 IOT_WEBHOOK_URL_TEMPLATE = os.getenv("IOT_WEBHOOK_URL_TEMPLATE", "")
 IOT_WEBHOOK_TIMEOUT = float(os.getenv("IOT_WEBHOOK_TIMEOUT", "3.0"))
+VISION_SERVICE_URL = os.getenv("VISION_SERVICE_URL", "http://vision-service:8060") # Nuevo
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
@@ -191,6 +193,35 @@ async def payment_confirmed(tx_id: str) -> TransactionResponse:
         machine_id = tx.machine_id
         db.commit(); db.refresh(tx)
         res = to_response(tx)
+
+    # --- NUEVA LOGICA PARA VISION SERVICE ---
+    try:
+        async with httpx.AsyncClient() as client:
+            vision_payload = {"tx_id": tx_id, "duration_seconds": 15} # Monitorear por 15 segundos
+            await client.post(f"{VISION_SERVICE_URL}/api/v1/vision/start-monitoring", json=vision_payload, timeout=5.0)
+            print(f"INFO: Vision Service activated for TX {tx_id}")
+    except Exception as e:
+        print(f"ERROR: Could not activate Vision Service for TX {tx_id}: {e}")
+    # --- FIN NUEVA LOGICA ---
+
+    # Notificar al cliente sobre el pago confirmado
+    if tx.user_id:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.post(
+                    f"{NOTIFICATION_SERVICE_URL}/api/v1/notifications/send",
+                    json={
+                        "user_email": tx.user_id,
+                        "title": "¡Pago Confirmado!",
+                        "summary": f"Tu pago de Bs. {tx.amount} ha sido recibido.",
+                        "description": f"Estamos preparando tu producto {tx.product_id} en la máquina {tx.machine_id}.",
+                        "type": "success"
+                    },
+                    timeout=2.0
+                )
+        except Exception as e:
+            print(f"ERROR sending notification: {e}")
+
     if IOT_WEBHOOK_ENABLED:
         try:
             url = IOT_WEBHOOK_URL_TEMPLATE.rstrip("/") + "/payment-confirmed"
@@ -233,6 +264,22 @@ async def dispense_result(tx_id: str, req: DispenseResultRequest) -> Transaction
                     print(f"DISPENSE FAILURE: Requesting refund for tx {tx.id}")
                     await client.post(f"{SIMUPAY_INTEGRATION_URL}/api/v1/payments/{tx.payment_reference}/refund", timeout=10.0)
                     tx.state = TransactionState.REFUNDED.value
+
+                    # Notificar al cliente sobre el reembolso
+                    if tx.user_id:
+                        try:
+                            await client.post(
+                                f"{NOTIFICATION_SERVICE_URL}/api/v1/notifications/send",
+                                json={
+                                    "user_email": tx.user_id,
+                                    "title": "Producto no entregado",
+                                    "summary": "Hubo un problema y se ha procesado tu reembolso.",
+                                    "description": f"No pudimos entregar tu producto {tx.product_id}. El monto de Bs. {tx.amount} ha sido devuelto a tu billetera.",
+                                    "type": "warning"
+                                },
+                                timeout=2.0
+                            )
+                        except: pass
                 else:
                     # Si success=true pero no estaba PAID, quizás es un despacho gratuito o error de flujo
                     # Solo guardamos los logs de distancia
@@ -290,6 +337,32 @@ async def get_top_sellers(machine_id: str = "MACHINE-001"):
             "items": [{"slot": r[0], "count": r[1]} for r in rows]
         }
 
+@app.get("/api/v1/admin/stats/failed-slots")
+async def get_failed_slots(machine_id: str = "MACHINE-001"):
+    with SessionLocal() as db:
+        rows = db.query(
+            Transaction.product_id, 
+            func.count(Transaction.id).label("count")
+        ).filter(
+            Transaction.machine_id == machine_id,
+            Transaction.state.in_([TransactionState.FAILED.value, TransactionState.REFUNDED.value])
+        ).group_by(Transaction.product_id).order_by(text("count DESC")).all()
+        
+        return {
+            "machine_id": machine_id,
+            "items": [{"slot": r[0], "count": r[1]} for r in rows]
+        }
+
+def cleanup_old_transactions():
+    with SessionLocal() as db:
+        expiration_time = datetime.utcnow() - timedelta(hours=1)
+        # Marcar como FAILED las transacciones antiguas en QR_PRINTED o QR_GENERATED
+        db.query(Transaction).filter(
+            Transaction.state.in_([TransactionState.QR_PRINTED.value, TransactionState.QR_GENERATED.value]),
+            Transaction.created_at < expiration_time
+        ).update({Transaction.state: TransactionState.FAILED.value, Transaction.error_log: "Expired cleanup"}, synchronize_session=False)
+        db.commit()
+
 # Almacenamiento en memoria para comandos de máquinas
 command_queues = {}
 
@@ -300,6 +373,22 @@ async def toggle_lights(machine_id: str):
     command_queues[machine_id].append("toggle_lights")
     print(f"DEBUG: Enqueued toggle_lights for {machine_id}")
     return {"status": "queued", "command": "toggle_lights", "machine_id": machine_id}
+
+@app.post("/api/v1/admin/commands/{machine_id}/lights-on")
+async def lights_on(machine_id: str):
+    if machine_id not in command_queues:
+        command_queues[machine_id] = []
+    command_queues[machine_id].append("lights_on")
+    print(f"DEBUG: Enqueued lights_on for {machine_id}")
+    return {"status": "queued", "command": "lights_on", "machine_id": machine_id}
+
+@app.post("/api/v1/admin/commands/{machine_id}/lights-off")
+async def lights_off(machine_id: str):
+    if machine_id not in command_queues:
+        command_queues[machine_id] = []
+    command_queues[machine_id].append("lights_off")
+    print(f"DEBUG: Enqueued lights_off for {machine_id}")
+    return {"status": "queued", "command": "lights_off", "machine_id": machine_id}
 
 @app.post("/api/v1/admin/commands/{machine_id}/refresh-config")
 async def refresh_config(machine_id: str):
@@ -318,6 +407,7 @@ async def poll_commands(machine_id: str):
 
 @app.get("/api/v1/admin/stats/summary")
 async def admin_stats_summary():
+    cleanup_old_transactions() # Ejecutar limpieza al cargar stats
     with SessionLocal() as db:
         # Total de ventas (COMPLETED)
         total_sales = db.query(func.sum(Transaction.amount)).filter(Transaction.state == TransactionState.COMPLETED.value).scalar() or 0.0
@@ -330,6 +420,7 @@ async def admin_stats_summary():
             "total_sales": total_sales,
             "status_breakdown": status_breakdown
         }
+
 
 @app.get("/api/v1/admin/stats/temperature-history")
 async def admin_temperature_history(machine_id: str = "MACHINE-001", interval_minutes: int = 10):
