@@ -4,11 +4,17 @@
 #include <TFT_eSPI.h>
 #include "qrcode.h"
 #include <Keypad.h>
-#include <DHT.h> 
 #include <Preferences.h> // MEMORIA PERMANENTE
 
+// ═══════════════════════════════════════════════════
+// ARQUITECTURA DE MICROPROCESADORES:
+//   ESP32 #1 (este) → TFT + Keypad + WiFi + QR (MAESTRO)
+//   ESP32 #2        → Motores PAP          (ESCLAVO MOTORES)  Serial2 (RX=16, TX=17)
+//   Pico WH         → NFC + Ultras. + Temp (ESCLAVO SENSORES) Serial  (RX=3,  TX=1)
+// ═══════════════════════════════════════════════════
+
 TFT_eSPI tft = TFT_eSPI();
-Preferences preferences; // Objeto para manejar la memoria
+Preferences preferences;
 
 const byte ROWS = 4, COLS = 4;
 char keys[ROWS][COLS] = {
@@ -21,42 +27,56 @@ byte rowPins[ROWS] = {26, 25, 33, 32};
 byte colPins[COLS] = {13, 12, 14, 27};
 Keypad keypad = Keypad(makeKeymap(keys), colPins, rowPins, ROWS, COLS);
 
-// Definir LED_BUILTIN si no está definido
 #ifndef LED_BUILTIN
 #define LED_BUILTIN 2
 #endif
+const int LED_PIN = LED_BUILTIN;
 
-// Usamos GPIO 2 (LED integrado) para las luces.
-// El TFT_DC está en el GPIO 21 según tu configuración.
-const int LED_PIN = LED_BUILTIN; 
-// RE-ASIGNADOS: 5 y 22 para no chocar con TFT_RST(4) y TFT_CS(15)
-const int TRIG_PIN = 5, ECHO_PIN = 22; 
+// ─── DATOS DE SENSORES (recibidos del Pico WH por Serial) ────────────────────
+// Protocolo: líneas de texto terminadas en '\n'
+//   NFC:<uid_hex>   → tarjeta detectada
+//   DIST:<cm>       → distancia del HC-SR04
+//   TEMP:<celsius>  → temperatura del DHT11
+// ─────────────────────────────────────────────────────────────────────────────
+// UART con Pico WH: RX=GPIO3, TX=GPIO1  (Serial — no usar Serial0 para debug)
+// NOTA: si necesitas debug por USB usa Serial0 (GPIO3/1) solo para Pico WH
+//       y usa Serial (USB-CDC) solo para logs en desarrollo.
+#define PICO_UART_RX 3
+#define PICO_UART_TX 1
+HardwareSerial PicoSerial(2); // Usamos Serial2 renombrado para el Pico
+// IMPORTANTE: Serial2 ya se usa para motores (RX=16, TX=17).
+// Usaremos Serial1 para el Pico WH: RX=GPIO9, TX=GPIO10
+// (Ajusta los pines si hay conflicto con tu PCB)
+HardwareSerial MotorSerial(2); // Serial2 → ESP32 esclavo de motores (RX=16, TX=17)
+HardwareSerial PicoWH(1);     // Serial1 → Pico WH sensores       (RX=9,  TX=10)
 
-#define DHTPIN 19     
-#define DHTTYPE DHT11 
-DHT dht(DHTPIN, DHTTYPE);
+String picoUartBuf = "";       // Buffer para parsear líneas del Pico WH
+float picoTemperatura = -99.0; // Última temperatura recibida del Pico WH
+float picoDistancia   = -1.0;  // Última distancia recibida del Pico WH
+String picoNfcUid     = "";    // Último UID NFC recibido del Pico WH
 
+// ─── VARIABLES DE DISTANCIA (ahora vienen del Pico WH) ───────────────────────
 float distanciaInicial = 0.0, distanciaFinal = 0.0;
 float prevM1 = 0.0, prevM2 = 0.0;
-const float UMBRAL_CAIDA_CM = 3.0; 
-// ==========================================================
+const float UMBRAL_CAIDA_CM = 3.0;
+// ─────────────────────────────────────────────────────────────────────────────
 
 // ================= CONFIGURACION SISTEMA ==================
-const char* WIFI_SSID = "ar-HP-Laptop-15-da2xxx";
+const char* WIFI_SSID     = "ar-HP-Laptop-15-da2xxx";
 const char* WIFI_PASSWORD = "123456789";
-String SERVER_IP = "10.42.0.1"; 
-const char* MACHINE_ID = "MACHINE-001";
-const int WEBHOOK_PORT = 8081;
-const unsigned long POLL_INTERVAL_MS = 1500;
-const unsigned long TELEMETRY_INTERVAL_MS = 5000; 
+String SERVER_IP          = "10.42.0.1";
+const char* MACHINE_ID    = "MACHINE-001";
+const int   WEBHOOK_PORT  = 8081;
+const unsigned long POLL_INTERVAL_MS     = 1500;
+const unsigned long TELEMETRY_INTERVAL_MS = 5000;
 // ==========================================================
 
 WebServer webhookServer(WEBHOOK_PORT);
 String currentTxId = "", inputCodigo = "", precioSeleccionado = "10.00";
 unsigned long lastPoll = 0;
-unsigned long lastPollCommands = 0; // NUEVO: Para el polling de comandos
-unsigned long lastTelemetry = 0;
-unsigned long lastActivityTime = 0; // NUEVO: Para el temporizador de inactividad
+unsigned long lastPollCommands = 0;
+unsigned long lastTelemetry    = 0;
+unsigned long lastActivityTime = 0;
 bool webhookPaymentPending = false;
 bool waitingForPayment = false;
 
@@ -139,37 +159,63 @@ void mostrarTeclaEnPantalla(char key) {
   tft.setCursor(xPos + 12, yPos + 10); tft.print(key);
 }
 
-float medirDistancia() {
-  // Asegurar que el pin esté limpio antes del pulso
-  digitalWrite(TRIG_PIN, LOW); 
-  delayMicroseconds(5);
-  
-  digitalWrite(TRIG_PIN, HIGH); 
-  delayMicroseconds(10);
-  digitalWrite(TRIG_PIN, LOW);
-  
-  // Timeout reducido para máxima velocidad de muestreo
-  long duration = pulseIn(ECHO_PIN, HIGH, 5000); 
-  
-  if (duration == 0) {
-    // Si da 0, intentamos una vez más tras un pequeño delay
-    delayMicroseconds(200);
-    digitalWrite(TRIG_PIN, HIGH); delayMicroseconds(10); digitalWrite(TRIG_PIN, LOW);
-    duration = pulseIn(ECHO_PIN, HIGH, 5000);
+/**
+ * Procesa mensajes entrantes del Pico WH (sensores) por PicoWH (Serial1).
+ * Protocolo: "NFC:<uid>\n" | "DIST:<cm>\n" | "TEMP:<C>\n" | "PONG\n"
+ * Llama esto en cada iteración del loop().
+ */
+void procesarPicoWH() {
+  while (PicoWH.available()) {
+    char c = PicoWH.read();
+    if (c == '\n') {
+      picoUartBuf.trim();
+      if (picoUartBuf.startsWith("DIST:")) {
+        picoDistancia = picoUartBuf.substring(5).toFloat();
+        Serial.printf("[PICO] Distancia: %.1f cm\n", picoDistancia);
+      } else if (picoUartBuf.startsWith("TEMP:")) {
+        picoTemperatura = picoUartBuf.substring(5).toFloat();
+        Serial.printf("[PICO] Temperatura: %.1f C\n", picoTemperatura);
+      } else if (picoUartBuf.startsWith("NFC:")) {
+        picoNfcUid = picoUartBuf.substring(4);
+        Serial.printf("[PICO] NFC UID: %s\n", picoNfcUid.c_str());
+        // TODO: aqui puedes autenticar el UID contra el backend
+      } else if (picoUartBuf == "PONG") {
+        Serial.println("[PICO] PONG recibido (Pico WH vivo)");
+      }
+      picoUartBuf = "";
+    } else {
+      picoUartBuf += c;
+    }
   }
+}
 
-  float cm = (duration * 0.0343) / 2.0;
-  
-  // Debug por Serial si hay error persistente
-  if (duration == 0) {
-    Serial.println("[SENSOR] Error: Sin pulso de ECO (¿está conectado?)");
-    return 400.0;
+/**
+ * Solicita una medida de distancia urgente al Pico WH y espera respuesta.
+ * Devuelve distancia en cm, o el último valor conocido si hay timeout.
+ */
+float medirDistancia() {
+  PicoWH.println("MEDIR");
+  unsigned long t = millis();
+  String buf = "";
+  while (millis() - t < 500) {   // Esperar máximo 500 ms
+    while (PicoWH.available()) {
+      char c = PicoWH.read();
+      if (c == '\n') {
+        buf.trim();
+        if (buf.startsWith("DIST:")) {
+          picoDistancia = buf.substring(5).toFloat();
+          Serial.printf("[PICO] Dist urgente: %.1f cm\n", picoDistancia);
+          return picoDistancia;
+        }
+        buf = "";
+      } else {
+        buf += c;
+      }
+    }
+    delay(5);
   }
-  
-  if (cm < 1.0) return 0.0; // Objeto demasiado cerca
-  if (cm > 400.0) return 400.0; // Fuera de rango
-  
-  return cm;
+  Serial.println("[PICO] Timeout distancia, usando ultimo valor.");
+  return picoDistancia > 0 ? picoDistancia : 400.0;
 }
 
 void dibujarMonitores(float temp = -1.0) {
@@ -202,12 +248,14 @@ String extractTxId(const String& body) {
   return body.substring(start, body.indexOf("\"", start));
 }
 
-void enviarTelemetria(float temp) {
+// Envía telemetría usando la temperatura recibida del Pico WH
+void enviarTelemetria() {
+  if (picoTemperatura == -99.0) return; // Sin dato válido aún
   HTTPClient http;
   String url = baseUrl() + "/api/v1/machines/" + MACHINE_ID + "/telemetry";
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
-  String body = "{\"temperature\":" + String(temp) + ", \"ip\":\"" + WiFi.localIP().toString() + "\"}";
+  String body = "{\"temperature\":" + String(picoTemperatura) + ", \"ip\":\"" + WiFi.localIP().toString() + "\"}";
   http.POST(body);
   http.end();
 }
@@ -497,12 +545,14 @@ void connectWifi() {
 
 void setup() {
   Serial.begin(115200);
-  // Inicializar Serial2 para el Esclavo (RX=16, TX=17)
+  // Inicializar Serial2 para el Esclavo de Motores (RX=16, TX=17)
   Serial2.begin(9600, SERIAL_8N1, 16, 17); 
+  // Inicializar Serial1 para el Pico WH de Sensores (RX=9, TX=10)
+  PicoWH.begin(9600, SERIAL_8N1, 9, 10);
   delay(1000);
   Serial.println("--- MASTER INICIADO ---");
 
-  pinMode(TRIG_PIN, OUTPUT); pinMode(ECHO_PIN, INPUT); pinMode(LED_PIN, OUTPUT);
+  pinMode(LED_PIN, OUTPUT);
   
   tft.init(); tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
@@ -520,16 +570,6 @@ void setup() {
 
   Serial.println("Configurando IP fija...");
   SERVER_IP = "10.42.0.1";
-  /*
-  Serial.println("Cargando configuracion...");
-  preferences.begin("grog", true); 
-  String savedIP = preferences.getString("server_ip", ""); 
-  preferences.end();
-  
-  if (savedIP != "") SERVER_IP = savedIP;
-  */
-  
-  dht.begin(); 
   
   webhookServer.on("/payment-confirmed", HTTP_POST, [](){
     String txId = webhookServer.arg("tx_id");
@@ -554,6 +594,8 @@ void setup() {
 
 void loop() {
   webhookServer.handleClient();
+  procesarPicoWH(); // Procesa mensajes de UART de Pico WH (NFC, distancia, temperatura)
+
   if (webhookPaymentPending) { webhookPaymentPending = false; processPaidTransaction(currentTxId); }
   
   unsigned long now = millis();
@@ -565,8 +607,8 @@ void loop() {
 
   if (now - lastTelemetry >= TELEMETRY_INTERVAL_MS) {
     lastTelemetry = now;
-    float t = dht.readTemperature();
-    if (!isnan(t)) { enviarTelemetria(t); dibujarMonitores(t); }
+    enviarTelemetria();
+    dibujarMonitores(picoTemperatura);
   }
 
   if (waitingForPayment && (now - lastPoll >= POLL_INTERVAL_MS)) {
@@ -625,7 +667,7 @@ void loop() {
       inputCodigo += key;
       tft.fillRect(10, 180, 180, 40, TFT_NAVY); tft.drawRect(10, 180, 180, 40, TFT_WHITE);
       tft.setCursor(20, 190); tft.setTextColor(TFT_WHITE); tft.setTextSize(2); tft.print("COD: "); tft.print(inputCodigo);
-      dibujarMonitores();
+      dibujarMonitores(picoTemperatura);
     }
   }
 }
