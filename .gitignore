@@ -1,0 +1,69 @@
+# ──────────────────────────────────────────────
+# Entornos virtuales Python
+# ──────────────────────────────────────────────
+venv/
+venv_linux/
+.venv/
+env/
+.env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# ──────────────────────────────────────────────
+# Bases de datos locales
+# ──────────────────────────────────────────────
+*.db
+*.sqlite3
+
+# ──────────────────────────────────────────────
+# Variables de entorno / secretos
+# ──────────────────────────────────────────────
+.env
+*.env
+.env.*
+!.env.example
+
+# ──────────────────────────────────────────────
+# Flutter / Dart
+# ──────────────────────────────────────────────
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+build/
+*.g.dart
+
+# ──────────────────────────────────────────────
+# Android
+# ──────────────────────────────────────────────
+*.apk
+*.aab
+local.properties
+.gradle/
+mobile_app/android/.gradle/
+mobile_app/android/local.properties
+
+# ──────────────────────────────────────────────
+# macOS / Windows / Linux sistema
+# ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ──────────────────────────────────────────────
+# Imágenes capturadas / temporales
+# ──────────────────────────────────────────────
+captured_frame.png
+
+# ──────────────────────────────────────────────
+# IDEs
+# ──────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
