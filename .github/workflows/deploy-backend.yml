@@ -1,0 +1,71 @@
+name: Deploy Backend to Azure VM
+
+on:
+  push:
+    branches:
+      - main
+      - despliegue
+    paths:
+      - 'backend/**'
+      - 'PaymentGateway-Service/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate Docker Compose Configuration
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose syntax
+        run: |
+          cd backend
+          docker compose config
+
+  deploy:
+    name: Deploy to Azure Linux VM
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and Deploy to Azure VM
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.AZURE_VM_HOST }}
+          username: ${{ secrets.AZURE_VM_USER }}
+          key: ${{ secrets.AZURE_SSH_PRIVATE_KEY }}
+          port: 22
+          script: |
+            echo "🚀 Iniciando despliegue en Azure VM..."
+            set -e
+
+            # Ubicarse en el directorio del proyecto
+            PROJECT_DIR="$HOME/Maquina-expendedora"
+            
+            if [ ! -d "$PROJECT_DIR" ]; then
+              echo "Clonando repositorio por primera vez..."
+              git clone https://github.com/${{ github.repository }}.git "$PROJECT_DIR"
+            fi
+
+            cd "$PROJECT_DIR"
+            echo "Actualizando código desde la rama ${{ github.ref_name }}..."
+            git fetch --all
+            git checkout ${{ github.ref_name }}
+            git pull origin ${{ github.ref_name }}
+
+            cd backend
+
+            # Si no existe .env, copiar desde .env.example
+            if [ ! -f ".env" ]; then
+              echo "Creando .env inicial a partir de .env.example..."
+              cp .env.example .env
+            fi
+
+            echo "Construyendo y levantando contenedores Docker..."
+            docker compose up -d --build --remove-orphans
+
+            echo "Limpiando imágenes residuales antiguas..."
+            docker image prune -f
+
+            echo "✅ Despliegue completado exitosamente!"
