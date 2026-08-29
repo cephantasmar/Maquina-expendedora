@@ -1,9 +1,8 @@
-name: Deploy Backend to Azure VM
+name: Deploy Backend to Azure 
 
 on:
   push:
     branches:
-      - main
       - despliegue
     paths:
       - 'backend/**'
