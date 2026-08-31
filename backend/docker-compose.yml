@@ -113,6 +113,14 @@ services:
     networks:
       - grog-network
 
+  payment-gateway-frontend:
+    build: ../PaymentGateway-Service/frontend
+    ports:
+      - "5174:5174"
+    networks:
+      - grog-network
+
+
 networks:
   grog-network:
     driver: bridge
